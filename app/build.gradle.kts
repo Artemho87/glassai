@@ -14,8 +14,8 @@ android {
     applicationId = "com.artem.glassai"
     minSdk = 31
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 2
+    versionName = "1.1"
 
     // Developer Mode в приложении Meta AI: оба значения "0"
     manifestPlaceholders["mwdat_application_id"] = "0"
@@ -29,6 +29,10 @@ android {
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
+      // Подпись всеми схемами: некоторые установщики (SAI, оболочки Xiaomi/Huawei) ищут старую v1
+      enableV1Signing = true
+      enableV2Signing = true
+      enableV3Signing = true
     }
   }
 
