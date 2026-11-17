@@ -224,7 +224,6 @@ private fun MainTab(busy: Boolean, translatorOn: Boolean, recordingOn: Boolean, 
   val guideOn by Brain.guideOn.collectAsState()
   var dialog by remember { mutableStateOf(Prefs.dialog) }
   var recGlasses by remember { mutableStateOf(Prefs.recGlassesMic) }
-  var readNotifs by remember { mutableStateOf(Prefs.readNotifs) }
 
   val photoPermission =
       rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
@@ -328,24 +327,6 @@ private fun MainTab(busy: Boolean, translatorOn: Boolean, recordingOn: Boolean, 
         "Текст — в Documents/GlassAI, звук — в Recordings/GlassAI. Нужен OpenRouter или Gemini.")
   }
 
-  Section("Чтение уведомлений вслух") {
-    Toggle("Читать сообщения, звонки и напоминания в очки", readNotifs) {
-      readNotifs = it
-      Prefs.readNotifs = it
-    }
-    OutlinedButton(
-        onClick = {
-          runCatching {
-            context.startActivity(
-                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-          }
-        },
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-      Text("Дать доступ к уведомлениям (один раз)")
-    }
-  }
 }
 
 // ---------- Переводчик ----------
@@ -537,14 +518,13 @@ private fun SettingsTab(
         onClick = {
           runCatching {
             context.startActivity(
-                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + context.packageName))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
           }
         },
         modifier = Modifier.fillMaxWidth(),
     ) {
-      Text("1. Отключить экономию батареи для приложения")
+      Text("1. Экономия батареи: найди «Очки ИИ» → «Не экономить»")
     }
     OutlinedButton(
         onClick = {

@@ -14,8 +14,8 @@ android {
     applicationId = "com.artem.glassai"
     minSdk = 31
     targetSdk = 36
-    versionCode = 7
-    versionName = "3.0"
+    versionCode = 8
+    versionName = "3.1"
 
     // Только 64-битные ARM-телефоны (все современные Android): APK заметно меньше
     ndk { abiFilters += "arm64-v8a" }
@@ -25,14 +25,13 @@ android {
     manifestPlaceholders["mwdat_client_token"] = "0"
   }
 
-  // Постоянный ключ подписи: обновления ставятся поверх, без удаления приложения
+  // Собственный ключ подписи (не отладочный): банковские антивирусы ругаются на отладочные сборки
   signingConfigs {
-    getByName("debug") {
-      storeFile = file("debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
-      // Подпись всеми схемами: некоторые установщики (SAI, оболочки Xiaomi/Huawei) ищут старую v1
+    create("release") {
+      storeFile = file("release.keystore")
+      storePassword = "glassai2026"
+      keyAlias = "glassai"
+      keyPassword = "glassai2026"
       enableV1Signing = true
       enableV2Signing = true
       enableV3Signing = true
@@ -40,8 +39,11 @@ android {
   }
 
   buildTypes {
-    debug { signingConfig = signingConfigs.getByName("debug") }
-    release { isMinifyEnabled = false }
+    release {
+      isMinifyEnabled = false
+      isDebuggable = false
+      signingConfig = signingConfigs.getByName("release")
+    }
   }
   buildFeatures { compose = true }
   compileOptions {

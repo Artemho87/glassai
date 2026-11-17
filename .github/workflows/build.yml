@@ -25,9 +25,9 @@ jobs:
         run: |
           chmod +x gradlew
           echo "sdk.dir=$ANDROID_HOME" > local.properties
-          ./gradlew --no-daemon --stacktrace assembleDebug 2>&1 | tee build.log
+          ./gradlew --no-daemon --stacktrace assembleRelease 2>&1 | tee build.log
           test ${PIPESTATUS[0]} -eq 0
-          cp app/build/outputs/apk/debug/app-debug.apk GlassAI.apk
+          cp app/build/outputs/apk/release/app-release.apk GlassAI.apk
 
       - name: Справка по API очков
         if: always()
