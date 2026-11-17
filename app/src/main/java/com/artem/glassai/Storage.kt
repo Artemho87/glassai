@@ -1,6 +1,8 @@
 package com.artem.glassai
 
+import android.Manifest
 import android.content.ContentUris
+import android.content.pm.PackageManager
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -30,6 +32,55 @@ object Storage {
   fun stamp(): String = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
 
   fun humanTime(): String = SimpleDateFormat("dd.MM HH:mm", Locale.US).format(Date())
+
+  fun timeOf(ms: Long): String = SimpleDateFormat("dd.MM HH:mm", Locale.US).format(Date(ms))
+
+  fun hasPhotoAccess(): Boolean =
+      ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+
+  /**
+   * Самый свежий снимок в галерее: сначала из папок Meta AI / Ray-Ban, иначе любой (кроме скриншотов).
+   * Возвращает адрес файла и время в миллисекундах.
+   */
+  fun latestImage(maxAgeMin: Int? = null): Pair<Uri, Long>? {
+    if (!hasPhotoAccess()) {
+      throw IllegalStateException("Нет доступа к фото. Нажми «🖼 Последний снимок» и разреши доступ ко всем фото")
+    }
+    val base = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+    val proj =
+        arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DATE_ADDED,
+            MediaStore.Images.Media.RELATIVE_PATH,
+            MediaStore.Images.Media.DISPLAY_NAME,
+        )
+    val cutoff = maxAgeMin?.let { System.currentTimeMillis() / 1000 - it * 60L } ?: 0L
+    var meta: Pair<Uri, Long>? = null
+    var any: Pair<Uri, Long>? = null
+    ctx.contentResolver
+        .query(base, proj, "${MediaStore.Images.Media.DATE_ADDED} >= ?", arrayOf(cutoff.toString()),
+            "${MediaStore.Images.Media.DATE_ADDED} DESC")
+        ?.use { c ->
+          var n = 0
+          while (meta == null && n < 60 && c.moveToNext()) {
+            n++
+            val id = c.getLong(0)
+            val added = c.getLong(1) * 1000
+            val path = (c.getString(2) ?: "").lowercase()
+            val name = (c.getString(3) ?: "").lowercase()
+            if (path.contains("screenshot") || path.contains("glassai")) continue
+            val item = ContentUris.withAppendedId(base, id) to added
+            if (any == null) any = item
+            if (path.contains("meta") || path.contains("ray-ban") || path.contains("rayban") || name.contains("meta")) {
+              meta = item
+            }
+          }
+        }
+    return meta ?: any
+  }
+
+  fun readBytes(uri: Uri): ByteArray? =
+      runCatching { ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
 
   fun saveBitmap(bmp: Bitmap, name: String): Uri? {
     val values =

@@ -18,7 +18,7 @@ object AiClient {
 
   /**
    * @param history прошлые реплики (чтобы ИИ помнил разговор)
-   * @param audioAac звук в формате AAC — для расшифровки диктофона (Claude звук не понимает)
+   * @param audio звук (aac или wav) — для диктофона и переводчика (Claude звук не понимает)
    */
   suspend fun ask(
       system: String,
@@ -26,20 +26,22 @@ object AiClient {
       image: Bitmap? = null,
       maxTokens: Int = 400,
       history: List<Turn> = emptyList(),
-      audioAac: ByteArray? = null,
+      audio: ByteArray? = null,
+      audioFormat: String = "aac",
   ): String =
       withContext(Dispatchers.IO) {
         val jpeg = image?.let { toBase64Jpeg(it) }
-        val audio = audioAac?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+        val b64 = audio?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
         when (Prefs.provider) {
-          "gemini" -> gemini(system, text, jpeg, maxTokens, history, audio)
+          "gemini" -> gemini(system, text, jpeg, maxTokens, history, b64, audioFormat)
           "claude" -> {
-            if (audio != null) {
-              error("Claude не умеет слушать звук. Для диктофона выбери OpenRouter или Gemini в «Настройках ИИ»")
+            if (b64 != null) {
+              error("Claude не умеет слушать звук. Выбери OpenRouter или Gemini в «Настройках ИИ» " +
+                  "или в переводчике переключи «Как слушать» на Google")
             }
             claude(system, text, jpeg, maxTokens, history)
           }
-          else -> openrouter(system, text, jpeg, maxTokens, history, audio)
+          else -> openrouter(system, text, jpeg, maxTokens, history, b64, audioFormat)
         }
       }
 
@@ -51,6 +53,57 @@ object AiClient {
     return ask(system, text, null, 300)
   }
 
+  /** Результат умного перевода */
+  data class Tr(val lang: String, val text: String, val translation: String, val translit: String)
+
+  /**
+   * Перевод живого разговора: сам определяет язык фразы и направление перевода.
+   * Принимает либо распознанный текст, либо звук фразы (WAV).
+   */
+  suspend fun smartTranslate(
+      text: String?,
+      wav: ByteArray?,
+      mine: String,
+      theirs: List<String>,
+      lastTheir: String,
+      hint: String?,
+      context: List<String>,
+  ): Tr {
+    val langs = (listOf(mine) + theirs).distinct()
+    val list = langs.joinToString(", ") { "«${Langs.name(it)}» ($it)" }
+    val theirNames = theirs.joinToString(" или ") { "«${Langs.name(it)}»" }
+    val ctx =
+        if (context.isEmpty()) ""
+        else "\nПредыдущие реплики разговора (только для контекста, их не переводи):\n" +
+            context.takeLast(6).joinToString("\n")
+    val system =
+        "Ты синхронный переводчик живого разговора.\n" +
+            "Мой язык: «${Langs.name(mine)}» ($mine). Язык собеседника: $theirNames.\n" +
+            "Определи, на каком языке сказана фраза (один из: $list).\n" +
+            "Если она на языке собеседника — переведи на «${Langs.name(mine)}».\n" +
+            "Если она на моём языке — переведи на «${Langs.name(lastTheir)}».\n" +
+            "Переводи естественно и разговорно, сохраняй смысл, тон и вежливость; имена и названия " +
+            "не переводи; ничего не добавляй от себя и не отвечай на саму фразу.$ctx\n" +
+            "Ответь строго одной строкой JSON без markdown:\n" +
+            "{\"lang\":\"код языка фразы\",\"text\":\"фраза в оригинале\",\"translation\":\"перевод\"," +
+            "\"translit\":\"произношение перевода латиницей, только если перевод сделан на язык собеседника " +
+            "с нелатинским письмом, иначе пустая строка\"}\n" +
+            "Если речи нет, это шум или ничего не понятно — верни все поля пустыми."
+    val user =
+        if (wav != null) "Переведи фразу из аудио."
+        else "Фраза: $text" + (hint?.let { "\n(распознаватель считает, что язык: $it)" } ?: "")
+    val raw = ask(system, user, null, 500, audio = wav, audioFormat = "wav")
+    val s = raw.indexOf('{')
+    val e = raw.lastIndexOf('}')
+    if (s >= 0 && e > s) {
+      val o = runCatching { JSONObject(raw.substring(s, e + 1)) }.getOrNull()
+      if (o != null) {
+        return Tr(o.optString("lang"), o.optString("text"), o.optString("translation"), o.optString("translit"))
+      }
+    }
+    return Tr(theirs.first(), text ?: "", raw.trim(), "")
+  }
+
   // ---------- OpenRouter (формат OpenAI) ----------
   private fun openrouter(
       system: String,
@@ -59,6 +112,7 @@ object AiClient {
       maxTokens: Int,
       history: List<Turn>,
       audio: String?,
+      audioFormat: String,
   ): String {
     val key = Prefs.openrouterKey
     require(key.isNotBlank()) { "Не указан ключ OpenRouter (раздел «Настройки ИИ»)" }
@@ -80,7 +134,7 @@ object AiClient {
       userContent.put(
           JSONObject()
               .put("type", "input_audio")
-              .put("input_audio", JSONObject().put("data", audio).put("format", "aac")),
+              .put("input_audio", JSONObject().put("data", audio).put("format", audioFormat)),
       )
     }
     messages.put(JSONObject().put("role", "user").put("content", userContent))
@@ -159,6 +213,7 @@ object AiClient {
       maxTokens: Int,
       history: List<Turn>,
       audio: String?,
+      audioFormat: String,
   ): String {
     val key = Prefs.geminiKey
     require(key.isNotBlank()) { "Не указан ключ Gemini API (раздел «Настройки ИИ»)" }
@@ -178,7 +233,7 @@ object AiClient {
       parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", jpeg)))
     }
     if (audio != null) {
-      parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "audio/aac").put("data", audio)))
+      parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "audio/$audioFormat").put("data", audio)))
     }
     parts.put(JSONObject().put("text", text))
     contents.put(JSONObject().put("role", "user").put("parts", parts))

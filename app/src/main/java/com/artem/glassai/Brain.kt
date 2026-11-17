@@ -2,6 +2,7 @@ package com.artem.glassai
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
 import com.meta.wearable.dat.core.types.ChargingState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -16,7 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** Вся логика: помощник с диалогом, переводчик, гид, заметки, диктофон, тачпад, заряд. */
+/** Вся логика: помощник с диалогом, разбор фото, переводчик, заметки, диктофон, заряд. */
 object Brain {
 
   data class Line(val who: String, val text: String)
@@ -35,13 +36,16 @@ object Brain {
   val guideOn = MutableStateFlow(false)
   val recordingOn = MutableStateFlow(false)
   val lastPhoto = MutableStateFlow<Bitmap?>(null)
-  /** Последний перевод крупно — чтобы показать экран собеседнику */
+  val lastAnswer = MutableStateFlow("")
+  /** Перевод для собеседника крупно на экране */
   val bigText = MutableStateFlow("")
+  val bigTranslit = MutableStateFlow("")
   val log = MutableStateFlow<List<Line>>(emptyList())
 
   private val history = ArrayList<AiClient.Turn>()
   private var lastTalk = 0L
   private val guideSaid = ArrayList<String>()
+  @Volatile private var lastTheir = ""
 
   fun init(context: Context) {
     if (inited) return
@@ -53,19 +57,22 @@ object Brain {
     Voice.init(context)
   }
 
-  /** Фоновые помощники: заряд очков и тачпад. Запускается, когда очки доступны. */
+  /** Фоновые помощники: заряд очков и (если включено) тачпад. */
   fun startBackground() {
     if (backgroundStarted || !Glasses.initialized.value) return
     backgroundStarted = true
     Glasses.startDeviceMonitor(scope)
-    scope.launch { Glasses.device.collect { d -> if (d != null) watchBattery(d.batteryLevel, d.chargingState == ChargingState.CHARGING) } }
+    scope.launch {
+      Glasses.device.collect { d ->
+        if (d != null) watchBattery(d.batteryLevel, d.chargingState == ChargingState.CHARGING)
+      }
+    }
     applyControls()
   }
 
   private fun addLog(who: String, text: String) {
     val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
     val prev = log.value.firstOrNull()
-    // одинаковые подряд сообщения не дублируем
     if (prev != null && prev.who.substringAfter(" ") == who && prev.text == text) return
     log.value = (listOf(Line("$time $who", text)) + log.value).take(400)
   }
@@ -115,10 +122,10 @@ object Brain {
     }
   }
 
-  // ================= тачпад на дужке =================
+  // ================= тачпад на дужке (нужна связь с очками) =================
 
   fun applyControls() {
-    if (Prefs.controls && Glasses.initialized.value) {
+    if (Prefs.controls && Prefs.cameraFeatures && Glasses.initialized.value) {
       if (controlsJob?.isActive == true) return
       controlsJob =
           Glasses.startControls(
@@ -158,28 +165,31 @@ object Brain {
     val lang = Langs.name(Prefs.myLang)
     val photoPart =
         if (hasPhoto)
-            "К последнему вопросу приложено фото — это то, что пользователь видит прямо сейчас через " +
-                "камеру очков (вид от первого лица). Опирайся на него, если вопрос про увиденное."
+            "К вопросу приложено фото, снятое камерой умных очков (вид от первого лица). " +
+                "Отвечай про него, если вопрос про увиденное."
         else
-            "Фото к этому вопросу НЕ приложено: камера очков сейчас не передала кадр, ты ничего не видишь. " +
-                "Никогда не притворяйся, что видишь. Если вопрос про то, что перед пользователем, честно " +
-                "скажи одной фразой, что кадр с очков не пришёл и причина записана в журнале приложения. " +
-                "На остальные вопросы отвечай как обычно."
+            "Фото к этому вопросу НЕ приложено, ты ничего не видишь — никогда не притворяйся, что видишь. " +
+                "Если вопрос про то, что перед пользователем, одной фразой подскажи: сфотографируй очками " +
+                "и спроси «что на фото». На остальные вопросы отвечай как обычно."
     return "Ты голосовой помощник в умных очках Ray-Ban Meta. $photoPart " +
         "Отвечай на языке «$lang», кратко: 1–3 предложения, разговорно. " +
         "Без списков, markdown, эмодзи и ссылок — ответ будет озвучен голосом. " +
-        "Цены, тексты, вывески, меню переводи и пересказывай по сути. Помни предыдущие реплики разговора."
+        "Тексты, вывески, меню и цены на фото переводи и пересказывай по сути. Помни предыдущие реплики."
   }
 
   private val visualWords =
       listOf("посмотри", "глянь", "видишь", "что это", "что тут", "что здесь", "передо мной", "прочитай",
-          "прочти", "переведи", "сколько стоит", "какой это", "какая это", "что написано", "на фото", "в кадре")
+          "прочти", "переведи", "сколько стоит", "какой это", "какая это", "что написано", "на фото",
+          "на снимке", "фото", "снимок", "в кадре")
   private val stopWords = listOf("стоп", "хватит", "спасибо", "всё", "все", "отбой", "пока")
 
   private fun has(text: String, vararg words: String) = words.any { text.contains(it) }
 
-  /** «Спросить»: слушаем вопрос + кадр с очков → ответ голосом → (диалог) слушаем следующий вопрос. */
-  fun ask() {
+  /**
+   * «Спросить»: слушаем вопрос → ответ голосом → (диалог) слушаем следующий.
+   * @param fixedPhoto фото, о котором идёт разговор (из галереи или «Поделиться»)
+   */
+  fun ask(fixedPhoto: Bitmap? = null) {
     if (Recorder.recording) {
       addLog("⚠", "Идёт запись диктофона. Сначала останови её.")
       return
@@ -195,15 +205,16 @@ object Brain {
           busy.value = true
           var after: (() -> Unit)? = null
           try {
-            if (System.currentTimeMillis() - lastTalk > 10 * 60_000) history.clear()
+            if (fixedPhoto != null || System.currentTimeMillis() - lastTalk > 10 * 60_000) history.clear()
+            if (fixedPhoto != null) lastPhoto.value = fixedPhoto
             var round = 0
             while (isActive) {
-              var photo: Bitmap? = null
+              var photo: Bitmap? = fixedPhoto
               var photoError: String? = null
               val question: String
 
-              if (round == 0) {
-                // Сначала запускаем камеру, микрофон очков включаем, когда видео пошло
+              if (round == 0 && fixedPhoto == null && Prefs.cameraFeatures) {
+                // Прямая камера очков: сначала камера, потом микрофон
                 val cameraReady = CompletableDeferred<Unit>()
                 val photoTask = async {
                   runCatching {
@@ -217,25 +228,50 @@ object Brain {
                 question = listenQuestion()
                 status.value = "Снимаю кадр…"
                 val r = photoTask.await()
-                r.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+                val err = r.exceptionOrNull()
+                if (err is CancellationException) throw err
                 photo = r.getOrNull()
-                photoError = r.exceptionOrNull()?.message
+                photoError = err?.message
               } else {
                 question = listenQuestion()
-                if (question.isBlank()) break
-                val lower = question.lowercase().trim().trimEnd('.', '!')
-                if (stopWords.any { lower == it }) break
-                if (visualWords.any { lower.contains(it) }) {
+                if (round > 0) {
+                  if (question.isBlank()) break
+                  val l = question.lowercase().trim().trimEnd('.', '!')
+                  if (stopWords.any { l == it }) break
+                }
+              }
+              val lower = question.lowercase()
+              val visual = question.isBlank() || visualWords.any { lower.contains(it) }
+
+              // Нет фото — берём последний снимок, сделанный очками штатно
+              if (photo == null && visual) {
+                if (Prefs.cameraFeatures && round > 0) {
                   val r = runCatching { Glasses.capture(onStep = { status.value = "Камера: $it…" }) }
-                  r.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+                  val err = r.exceptionOrNull()
+                  if (err is CancellationException) throw err
                   photo = r.getOrNull()
-                  photoError = r.exceptionOrNull()?.message
+                  if (err != null) photoError = err.message
+                } else if (!Prefs.cameraFeatures) {
+                  val explicit = has(lower, "фото", "снимок", "снимке", "последн")
+                  val found =
+                      withContext(Dispatchers.IO) {
+                        runCatching { Storage.latestImage(if (explicit) null else 5) }
+                      }
+                  val item = found.getOrNull()
+                  if (item != null) {
+                    val bmp = loadBitmap(item.first)
+                    if (bmp != null) {
+                      photo = bmp
+                      addLog("🖼", "Беру снимок с очков от ${Storage.timeOf(item.second)}")
+                    }
+                  } else if (explicit) {
+                    photoError = found.exceptionOrNull()?.message ?: "В галерее не нашёл снимков с очков"
+                  }
                 }
               }
               if (photo != null) lastPhoto.value = photo
-              if (photoError != null) addLog("⚠", "Камера: $photoError")
+              if (photoError != null) addLog("⚠", "Фото: $photoError")
 
-              val lower = question.lowercase()
               // ---- голосовые команды ----
               if (has(lower, "запиши встречу", "запиши разговор", "включи диктофон", "начни запись")) {
                 after = { startRecording() }
@@ -247,16 +283,8 @@ object Brain {
                 break
               }
               if (has(lower, "сфотографируй", "сделай фото", "сделай снимок")) {
-                doFullPhoto()
-                break
-              }
-              if (has(lower, "включи гид", "режим гида", "запусти гид")) {
-                after = { startGuide() }
-                break
-              }
-              if (has(lower, "выключи гид", "останови гид")) {
-                stopGuide()
-                Voice.speak("Гид выключен", Prefs.myLang)
+                if (Prefs.cameraFeatures) doFullPhoto()
+                else Voice.speak("Скажи «Hey Meta, сфотографируй», а потом спроси меня «что на фото».", Prefs.myLang)
                 break
               }
               if (has(lower, "включи переводчик")) {
@@ -269,20 +297,30 @@ object Brain {
                 break
               }
 
+              if (question.isBlank() && photo == null) {
+                Voice.speak("Не расслышал вопрос", Prefs.myLang)
+                break
+              }
               val wantsSave = lower.startsWith("сохрани") && photo != null
               val q =
-                  if (wantsSave) "Опиши в 1–2 предложениях, что на фото, чтобы я это запомнил."
-                  else question.ifBlank { "Что сейчас передо мной? Опиши коротко самое важное." }
+                  when {
+                    wantsSave -> "Опиши в 1–2 предложениях, что на фото, чтобы я это запомнил."
+                    question.isBlank() ->
+                        "Что на этом фото? Опиши коротко самое важное, тексты и цены переведи."
+                    else -> question
+                  }
               addLog("Я", q)
               status.value = "Думаю…"
               val answer = AiClient.ask(assistantPrompt(photo != null), q, photo, history = history.toList())
               addLog("ИИ", answer)
+              lastAnswer.value = answer
               history.add(AiClient.Turn(q, answer))
               while (history.size > 8) history.removeAt(0)
               lastTalk = System.currentTimeMillis()
 
-              if (wantsSave && photo != null) {
-                saveFind(photo, answer)
+              val savedPhoto = photo
+              if (wantsSave && savedPhoto != null) {
+                saveFind(savedPhoto, answer)
                 addLog("⭐", "Сохранено в находки")
               }
 
@@ -296,9 +334,8 @@ object Brain {
           } catch (e: CancellationException) {
             throw e
           } catch (e: Exception) {
-            val msg = e.message ?: "Неизвестная ошибка"
-            addLog("⚠", msg)
-            runCatching { Voice.speak("Ошибка. Подробности на экране телефона.", "ru-RU") }
+            addLog("⚠", e.message ?: "Неизвестная ошибка")
+            runCatching { Voice.speak("Ошибка. Подробности в журнале.", "ru-RU") }
           } finally {
             Voice.releaseRoute()
             busy.value = false
@@ -319,7 +356,66 @@ object Brain {
     return heard
   }
 
-  // ================= заметки, находки, фото =================
+  // ================= разбор фото, снятых очками =================
+
+  private suspend fun loadBitmap(uri: Uri): Bitmap? =
+      withContext(Dispatchers.IO) { Storage.readBytes(uri)?.let { Glasses.decodeBytes(it, 1600) } }
+
+  /** Последний снимок из галереи → разговор о нём. */
+  fun analyzeLatest() {
+    if (busy.value || Recorder.recording || asking) return
+    scope.launch {
+      val found = withContext(Dispatchers.IO) { runCatching { Storage.latestImage() } }
+      val item = found.getOrNull()
+      if (item == null) {
+        val msg =
+            found.exceptionOrNull()?.message
+                ?: "В галерее нет снимков с очков. Проверь, что Meta AI сохраняет фото в галерею телефона"
+        addLog("⚠", msg)
+        runCatching { Voice.speak("Не нашёл снимок. Подробности в журнале.", Prefs.myLang) }
+        return@launch
+      }
+      val bmp = loadBitmap(item.first)
+      if (bmp == null) {
+        addLog("⚠", "Не удалось открыть снимок")
+        return@launch
+      }
+      addLog("🖼", "Снимок от ${Storage.timeOf(item.second)}. Задай вопрос или промолчи — опишу")
+      ask(bmp)
+    }
+  }
+
+  /** Фото, выбранное вручную или присланное через «Поделиться». */
+  fun analyzeUri(uri: Uri) {
+    if (Recorder.recording) return
+    scope.launch {
+      val bmp = loadBitmap(uri)
+      if (bmp == null) {
+        addLog("⚠", "Не удалось открыть фото")
+        return@launch
+      }
+      stopAll()
+      addLog("🖼", "Фото открыто. Задай вопрос или промолчи — опишу")
+      ask(bmp)
+    }
+  }
+
+  /** Сохранить последнее фото с ответом ИИ в «Сохранённое». */
+  fun saveAnalysis() {
+    val p = lastPhoto.value
+    val a = lastAnswer.value
+    if (p == null || a.isBlank()) {
+      addLog("⚠", "Сначала разбери фото")
+      return
+    }
+    scope.launch {
+      saveFind(p, a)
+      addLog("⭐", "Сохранено в находки")
+      runCatching { Voice.speak("Сохранил", Prefs.myLang) }
+    }
+  }
+
+  // ================= заметки, находки =================
 
   private suspend fun saveNote(text: String) {
     val uri = withContext(Dispatchers.IO) { Storage.appendText("Заметки", "[${Storage.humanTime()}] $text") }
@@ -359,6 +455,8 @@ object Brain {
         }
   }
 
+  // ================= прямая камера очков (выключено по умолчанию) =================
+
   private suspend fun doFullPhoto() {
     val bytes = Glasses.captureFull { status.value = "Фото: $it…" }
     val uri = withContext(Dispatchers.IO) { Storage.saveImageBytes(bytes, "Фото_${Storage.stamp()}") }
@@ -369,34 +467,13 @@ object Brain {
     Voice.speak("Фото сохранено", Prefs.myLang)
   }
 
-  /** Фото в полном качестве в галерею. */
   fun fullPhoto() = simpleJob("Фото") { doFullPhoto() }
 
-  /** Проверка камеры без микрофона и ИИ. */
   fun testCamera() =
       simpleJob("Камера") {
         val bmp = Glasses.capture(onStep = { status.value = "Камера: $it…" }, force = true)
         lastPhoto.value = bmp
         addLog("📷", "Кадр получен: ${bmp.width}×${bmp.height}. Камера работает ✅")
-      }
-
-  /** Сохранить то, что сейчас вижу, с описанием от ИИ. */
-  fun saveView() =
-      simpleJob("Сохранение") {
-        val bmp = Glasses.capture(onStep = { status.value = "Камера: $it…" })
-        lastPhoto.value = bmp
-        status.value = "Описываю…"
-        val text =
-            AiClient.ask(
-                "Опиши на языке «${Langs.name(Prefs.myLang)}» в 1–2 предложениях, что на фото: место, " +
-                    "предмет, текст вывесок и цены, если есть. Без вступлений.",
-                "Что на фото?",
-                bmp,
-                200,
-            )
-        saveFind(bmp, text)
-        addLog("⭐", text)
-        Voice.speak("Сохранил. $text", Prefs.myLang)
       }
 
   private fun simpleJob(title: String, block: suspend () -> Unit) {
@@ -417,8 +494,6 @@ object Brain {
         }
   }
 
-  // ================= режим гида =================
-
   private fun guidePrompt(): String {
     val told = if (guideSaid.isEmpty()) "ничего" else guideSaid.joinToString(" | ")
     return "Ты гид в умных очках. Тебе приходит кадр с камеры очков: это то, что пользователь видит сейчас. " +
@@ -430,11 +505,8 @@ object Brain {
   }
 
   fun startGuide() {
-    if (guideOn.value) return
-    if (Recorder.recording) {
-      addLog("⚠", "Идёт запись диктофона. Гид недоступен.")
-      return
-    }
+    if (guideOn.value || !Prefs.cameraFeatures) return
+    if (Recorder.recording) return
     guideOn.value = true
     guideSaid.clear()
     addLog("🧭", "Режим гида включён: смотрю вокруг раз в ${Prefs.guideSec} с")
@@ -442,7 +514,6 @@ object Brain {
         scope.launch {
           var fails = 0
           try {
-            if (!busy.value) Voice.speak("Режим гида включён", Prefs.myLang)
             while (isActive && guideOn.value) {
               if (!busy.value && !Recorder.recording) {
                 try {
@@ -516,7 +587,6 @@ object Brain {
               addLog("⚠", "Запись получилась пустой")
               return@launch
             }
-            // сначала сохраняем звук — он не пропадёт, даже если расшифровка не удастся
             withContext(Dispatchers.IO) {
               files.forEachIndexed { i, f ->
                 Storage.saveAudio(f, if (files.size == 1) name else "${name}_часть${i + 1}")
@@ -535,7 +605,8 @@ object Brain {
                           "Без комментариев и вступлений. Если речи нет — выведи: (тишина).",
                       "Расшифруй эту запись.",
                       maxTokens = 3000,
-                      audioAac = bytes,
+                      audio = bytes,
+                      audioFormat = "aac",
                   )
               transcript.append(part).append("\n\n")
             }
@@ -566,7 +637,39 @@ object Brain {
 
   // ================= ИИ-переводчик =================
 
-  /** Постоянно слушаем собеседника и шепчем перевод в очки. */
+  private fun theirLangs(): List<String> =
+      listOf(Prefs.theirLang, Prefs.theirLang2)
+          .filter { it.isNotBlank() && it != Prefs.myLang }
+          .distinct()
+          .ifEmpty { listOf("en-US") }
+
+  /** Сопоставляет код языка от ИИ («th», «th-TH») с языком из списка. */
+  private fun matchLang(code: String, options: List<String>): String? {
+    val p = code.lowercase().trim().take(2)
+    if (p.length < 2) return null
+    return options.firstOrNull { it.lowercase().startsWith(p) }
+  }
+
+  private fun currentTheir(): String {
+    val theirs = theirLangs()
+    return matchLang(lastTheir, theirs) ?: theirs.first()
+  }
+
+  /** Говорит перевод собеседнику через громкий динамик телефона, потом возвращает звук в очки. */
+  private suspend fun speakToThem(text: String, lang: String) {
+    val wasGlasses = Voice.route == Voice.Route.GLASSES
+    Voice.releaseRoute()
+    Voice.routeToPhoneSpeaker()
+    Voice.speak(text, lang)
+    Voice.releaseRoute()
+    if (wasGlasses) Voice.routeToGlasses()
+  }
+
+  /**
+   * Переводчик: слушает разговор, сам понимает, кто говорит.
+   * Собеседник → перевод мне в очки. Я (если включено «в обе стороны») → перевод вслух через телефон
+   * и крупно на экране.
+   */
   fun startTranslator() {
     if (translatorOn.value || Recorder.recording) return
     job?.cancel()
@@ -574,34 +677,81 @@ object Brain {
     busy.value = true
     job =
         scope.launch {
+          val mine = Prefs.myLang
+          val theirs = theirLangs()
+          lastTheir = currentTheir()
+          val convo = ArrayList<String>()
           try {
+            for (l in theirs + mine) {
+              if (!Voice.hasVoice(l)) {
+                addLog("⚠", "Нет голоса для языка «${Langs.name(l)}»: Настройки телефона → Синтез речи → " +
+                    "Google → Установить голосовые данные → ${Langs.name(l)}")
+              }
+            }
             val glassesAudio = Voice.routeToGlasses()
             addLog(
                 "ℹ",
-                "Переводчик: ${Langs.name(Prefs.theirLang)} → ${Langs.name(Prefs.myLang)}" +
+                "Переводчик: ${theirs.joinToString("/") { Langs.name(it) }} ⇄ ${Langs.name(mine)}" +
+                    (if (Prefs.twoWay) ", в обе стороны" else ", только собеседник") +
+                    (if (Prefs.engine == "ai") ", слушает ИИ" else ", распознавание Google") +
                     if (glassesAudio) " (микрофон очков)" else " (микрофон телефона)",
             )
             var misses = 0
+            var warnedLang = false
             while (isActive && translatorOn.value) {
-              status.value = "Слушаю собеседника (${Langs.name(Prefs.theirLang)})…"
-              val heard = Voice.listen(Prefs.theirLang, silenceMs = 1200)
-              if (heard == null) {
-                misses++
-                delay(if (misses > 5) 800 else 250)
-                continue
-              }
-              misses = 0
-              addLog("Он", heard)
-              status.value = "Перевожу…"
+              status.value =
+                  "Слушаю… ${theirs.joinToString("/") { Langs.name(it) }}" +
+                      if (Prefs.twoWay) " и ${Langs.name(mine)}" else ""
+              var tr: AiClient.Tr? = null
               try {
-                val tr = AiClient.translate(heard, Prefs.theirLang, Prefs.myLang)
-                addLog("→", tr)
-                Voice.speak(tr, Prefs.myLang)
+                if (Prefs.engine == "ai") {
+                  val wav = AudioCapture.recordPhrase(silenceMs = Prefs.pauseMs.toLong())
+                  if (wav != null) {
+                    status.value = "Перевожу…"
+                    tr = AiClient.smartTranslate(null, wav, mine, theirs, lastTheir, null, convo)
+                  }
+                } else {
+                  val others = (theirs + (if (Prefs.twoWay) listOf(mine) else emptyList())).filter { it != lastTheir }
+                  val heard = Voice.listenEx(lastTheir, others, Prefs.pauseMs.toLong())
+                  if (heard != null) {
+                    status.value = "Перевожу…"
+                    tr = AiClient.smartTranslate(heard.text, null, mine, theirs, lastTheir, heard.lang, convo)
+                  } else if ((Voice.lastError == 12 || Voice.lastError == 13) && !warnedLang) {
+                    warnedLang = true
+                    addLog("⚠", "Распознавание Google не поддерживает выбранные языки на этом телефоне. " +
+                        "В переводчике переключи «Как слушать» на «ИИ»")
+                  }
+                }
               } catch (e: CancellationException) {
                 throw e
               } catch (e: Exception) {
                 addLog("⚠", e.message ?: "Ошибка перевода")
                 delay(1500)
+              }
+              val t = tr
+              if (t == null || t.translation.isBlank()) {
+                misses++
+                delay(if (misses > 5) 500 else 100)
+                continue
+              }
+              misses = 0
+              val fromMe = matchLang(t.lang, listOf(mine)) != null && matchLang(t.lang, theirs) == null
+              if (fromMe) {
+                if (!Prefs.twoWay) continue
+                addLog("Я", t.text)
+                addLog("←", t.translation + if (t.translit.isNotBlank()) "  [${t.translit}]" else "")
+                bigText.value = t.translation
+                bigTranslit.value = t.translit
+                convo.add("Я: ${t.text} → ${t.translation}")
+                status.value = "Говорю перевод через телефон…"
+                speakToThem(t.translation, lastTheir)
+              } else {
+                val detected = matchLang(t.lang, theirs)
+                if (detected != null) lastTheir = detected
+                addLog("Он", t.text)
+                addLog("→", t.translation)
+                convo.add("Собеседник: ${t.text} → ${t.translation}")
+                Voice.speak(t.translation, mine)
               }
             }
           } catch (e: CancellationException) {
@@ -613,11 +763,33 @@ object Brain {
             translatorOn.value = false
             busy.value = false
             status.value = "Готов"
+            if (convo.size >= 2) saveConversation(convo)
           }
         }
   }
 
-  /** «Мой ответ»: говорю по-своему, перевод звучит громко из телефона и крупно на экране. */
+  private fun saveConversation(convo: List<String>) {
+    runCatching {
+      val name = "Разговор_${Storage.stamp()}"
+      val uri = Storage.saveText(name, "РАЗГОВОР (${Storage.humanTime()})\n\n" + convo.joinToString("\n"))
+      Library.add("Разговор", convo.take(3).joinToString(" · ").take(220), uri)
+      addLog("💬", "Разговор сохранён: Documents/GlassAI/$name.txt")
+    }
+  }
+
+  private suspend fun sayToThem(mine: String) {
+    addLog("Я", mine)
+    status.value = "Перевожу…"
+    val target = currentTheir()
+    val t = AiClient.smartTranslate(mine, null, Prefs.myLang, listOf(target), target, Prefs.myLang, emptyList())
+    addLog("←", t.translation + if (t.translit.isNotBlank()) "  [${t.translit}]" else "")
+    bigText.value = t.translation
+    bigTranslit.value = t.translit
+    status.value = "Говорю перевод через телефон…"
+    speakToThem(t.translation, target)
+  }
+
+  /** «Мой ответ» голосом: перевод звучит громко из телефона и крупно на экране. */
   fun replyMine() {
     if (Recorder.recording) return
     val resumeTranslator = translatorOn.value
@@ -630,20 +802,33 @@ object Brain {
             Voice.routeToGlasses()
             Voice.beep()
             status.value = "Говори свой ответ (${Langs.name(Prefs.myLang)})…"
-            val mine = Voice.listen(Prefs.myLang)
-            if (mine == null) {
-              status.value = "Не расслышал"
-            } else {
-              addLog("Я", mine)
-              status.value = "Перевожу…"
-              val tr = AiClient.translate(mine, Prefs.myLang, Prefs.theirLang)
-              addLog("←", tr)
-              bigText.value = tr
-              Voice.releaseRoute()
-              Voice.routeToPhoneSpeaker()
-              status.value = "Говорю перевод через телефон…"
-              Voice.speak(tr, Prefs.theirLang)
-            }
+            val mine = Voice.listen(Prefs.myLang, 1500)
+            Voice.releaseRoute()
+            if (mine == null) status.value = "Не расслышал" else sayToThem(mine)
+          } catch (e: CancellationException) {
+            throw e
+          } catch (e: Exception) {
+            addLog("⚠", e.message ?: "Ошибка")
+          } finally {
+            Voice.releaseRoute()
+            busy.value = false
+            status.value = "Готов"
+          }
+          if (resumeTranslator) startTranslator()
+        }
+  }
+
+  /** Напечатанный ответ: перевод звучит громко из телефона и крупно на экране. */
+  fun replyTyped(text: String) {
+    if (text.isBlank() || Recorder.recording) return
+    val resumeTranslator = translatorOn.value
+    stopTranslatorLoop()
+    job =
+        scope.launch {
+          while (busy.value) delay(50)
+          busy.value = true
+          try {
+            sayToThem(text.trim())
           } catch (e: CancellationException) {
             throw e
           } catch (e: Exception) {
@@ -664,7 +849,7 @@ object Brain {
     }
   }
 
-  /** Останавливает помощника, переводчик и гида. Диктофон останавливается своей кнопкой. */
+  /** Останавливает помощника и переводчик. Диктофон останавливается своей кнопкой. */
   fun stopAll() {
     translatorOn.value = false
     job?.cancel()
@@ -679,5 +864,6 @@ object Brain {
   fun clearLog() {
     log.value = emptyList()
     bigText.value = ""
+    bigTranslit.value = ""
   }
 }

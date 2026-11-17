@@ -9,8 +9,10 @@ import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -18,6 +20,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -80,20 +83,26 @@ class MainActivity : ComponentActivity() {
   private val cameraPermissionLauncher =
       registerForActivityResult(Wearables.RequestPermissionContract()) { result ->
         val status = result.getOrDefault(PermissionStatus.Denied)
-        val text =
-            if (status == PermissionStatus.Granted) "Камера очков разрешена ✅"
-            else "Камера очков не разрешена"
+        val text = if (status == PermissionStatus.Granted) "Камера очков разрешена ✅" else "Камера очков не разрешена"
         Toast.makeText(this, text, Toast.LENGTH_LONG).show()
       }
 
-  private fun has(p: String) =
-      ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+  private fun has(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
   private fun onAndroidPermissions() {
     if (has(Manifest.permission.BLUETOOTH_CONNECT)) Glasses.init(this)
     if (has(Manifest.permission.RECORD_AUDIO)) AssistantService.start(this)
     else Toast.makeText(this, "Без микрофона помощник не сможет слушать", Toast.LENGTH_LONG).show()
     Brain.startBackground()
+  }
+
+  /** Фото, присланное через «Поделиться» */
+  private fun handleShare(intent: Intent?) {
+    if (intent?.action != Intent.ACTION_SEND) return
+    if (intent.type?.startsWith("image/") != true) return
+    val uri = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java) ?: return
+    Brain.analyzeUri(uri)
+    setIntent(Intent(this, MainActivity::class.java))
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -116,18 +125,24 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
+    handleShare(intent)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    handleShare(intent)
   }
 
   override fun onStart() {
     super.onStart()
-    if (androidPermissions.all { has(it) }) onAndroidPermissions()
-    else permissionLauncher.launch(androidPermissions)
+    if (androidPermissions.all { has(it) }) onAndroidPermissions() else permissionLauncher.launch(androidPermissions)
   }
 }
 
 private val Yellow = Color(0xFFFFD166)
 private val Green = Color(0xFF2A9D8F)
 private val Red = Color(0xFFE76F51)
+private val Gray = Color(0xFF9A9AB0)
 
 // ======================= Экран =======================
 
@@ -137,29 +152,17 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
   val status by Brain.status.collectAsState()
   val busy by Brain.busy.collectAsState()
   val translatorOn by Brain.translatorOn.collectAsState()
-  val guideOn by Brain.guideOn.collectAsState()
   val recordingOn by Brain.recordingOn.collectAsState()
-  val photo by Brain.lastPhoto.collectAsState()
-  val big by Brain.bigText.collectAsState()
   val log by Brain.log.collectAsState()
   val saved by Library.items.collectAsState()
-  val initialized by Glasses.initialized.collectAsState()
   val device by Glasses.device.collectAsState()
-  val controlsActive by Glasses.controlsActive.collectAsState()
-
   val needsUpdate by Glasses.needsUpdate.collectAsState()
+
   var tab by remember { mutableStateOf(0) }
-  var myLang by remember { mutableStateOf(Prefs.myLang) }
-  var theirLang by remember { mutableStateOf(Prefs.theirLang) }
-  var dialog by remember { mutableStateOf(Prefs.dialog) }
-  var controls by remember { mutableStateOf(Prefs.controls) }
-  var readNotifs by remember { mutableStateOf(Prefs.readNotifs) }
-  var recGlasses by remember { mutableStateOf(Prefs.recGlassesMic) }
-  var guideSec by remember { mutableStateOf(Prefs.guideSec) }
+  var cameraFeatures by remember { mutableStateOf(Prefs.cameraFeatures) }
 
   Column(
-      modifier =
-          Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(16.dp),
+      modifier = Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(16.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     Text("Очки ИИ", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Yellow)
@@ -175,291 +178,292 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
       val charging = if (d.chargingState.name == "CHARGING") " · заряжаются" else ""
       Text("🔋 Очки: $battery$worn$charging", fontSize = 14.sp, color = Color(0xFFBBBBBB))
     }
-
-    if (tab == 3) {
-    if (needsUpdate) {
+    if (cameraFeatures && needsUpdate) {
       Box(Modifier.fillMaxWidth().background(Red, RoundedCornerShape(12.dp)).padding(12.dp)) {
         Text("⚠ " + Glasses.UPDATE_HELP, color = Color.White, fontSize = 14.sp)
       }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-      listOf("Главная", "Сохранённое", "Журнал", "Настройки").forEachIndexed { i, title ->
+      listOf("Главная", "Переводчик", "Сохранённое", "Журнал", "Настройки").forEachIndexed { i, title ->
         OutlinedButton(
             onClick = { tab = i },
             modifier = Modifier.weight(1f),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(2.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = if (tab == i) Yellow else Color(0xFF9A9AB0)),
+            contentPadding = PaddingValues(1.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = if (tab == i) Yellow else Gray),
         ) {
-          Text(title, fontSize = 12.sp, maxLines = 1)
+          Text(title, fontSize = 10.sp, maxLines = 1)
         }
       }
     }
 
-    // ---------- Подключение ----------
-    Section("Подключение очков") {
-      if (initialized) RegistrationLine()
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = onRegister, modifier = Modifier.weight(1f)) { Text("Подключить") }
-        OutlinedButton(onClick = onCameraPermission, modifier = Modifier.weight(1f)) {
-          Text("Разрешить камеру")
-        }
-      }
-      OutlinedButton(onClick = { Brain.testCamera() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-        Text("📷  Проверить камеру очков")
-      }
+    when (tab) {
+      0 -> MainTab(busy, translatorOn, recordingOn, cameraFeatures)
+      1 -> TranslatorTab(translatorOn, recordingOn)
+      2 -> SavedTab(context, saved)
+      3 -> LogTab(context, log)
+      else ->
+          SettingsTab(context, onRegister, onCameraPermission, cameraFeatures) {
+            cameraFeatures = it
+            Prefs.cameraFeatures = it
+            Brain.applyControls()
+          }
     }
 
+    OutlinedButton(onClick = { Brain.stopAll() }, modifier = Modifier.fillMaxWidth()) { Text("■ Стоп всё") }
+    Spacer(Modifier.height(40.dp))
+  }
+}
+
+// ---------- Главная ----------
+
+@Composable
+private fun MainTab(busy: Boolean, translatorOn: Boolean, recordingOn: Boolean, cameraFeatures: Boolean) {
+  val context = LocalContext.current
+  val photo by Brain.lastPhoto.collectAsState()
+  val answer by Brain.lastAnswer.collectAsState()
+  val guideOn by Brain.guideOn.collectAsState()
+  var dialog by remember { mutableStateOf(Prefs.dialog) }
+  var recGlasses by remember { mutableStateOf(Prefs.recGlassesMic) }
+  var readNotifs by remember { mutableStateOf(Prefs.readNotifs) }
+
+  val photoPermission =
+      rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) Brain.analyzeLatest()
+        else Toast.makeText(context, "Нужен доступ ко всем фото, чтобы найти снимок с очков", Toast.LENGTH_LONG).show()
+      }
+  val picker =
+      rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) Brain.analyzeUri(uri)
+      }
+
+  Section("ИИ-помощник") {
+    Button(
+        onClick = { Brain.ask() },
+        enabled = (!busy || translatorOn) && !recordingOn,
+        modifier = Modifier.fillMaxWidth().height(64.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Yellow, contentColor = Color.Black),
+    ) {
+      Text("🎤  Спросить", fontSize = 18.sp, fontWeight = FontWeight.Bold)
     }
-    if (tab == 0) {
-    // ---------- Помощник ----------
-    Section("ИИ-помощник") {
+    Toggle("Диалог: после ответа слушать дальше", dialog) {
+      dialog = it
+      Prefs.dialog = it
+    }
+    Hint("Спрашивай о чём угодно. В диалоге можно уточнять без нажатия; закончить — «стоп», «спасибо» или " +
+        "помолчать. Команды: «запиши …» (заметка), «что на фото», «сохрани это», «включи диктофон», " +
+        "«включи переводчик», «новый разговор».")
+  }
+
+  Section("Разбор фото с очков") {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       Button(
-          onClick = { Brain.ask() },
-          enabled = (!busy || translatorOn) && !recordingOn,
-          modifier = Modifier.fillMaxWidth().height(64.dp),
-          colors = ButtonDefaults.buttonColors(containerColor = Yellow, contentColor = Color.Black),
+          onClick = {
+            if (Storage.hasPhotoAccess()) Brain.analyzeLatest()
+            else photoPermission.launch(Manifest.permission.READ_MEDIA_IMAGES)
+          },
+          enabled = !busy && !recordingOn,
+          modifier = Modifier.weight(1f),
+          colors = ButtonDefaults.buttonColors(containerColor = Green),
       ) {
-        Text("🎤  Спросить", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text("🖼 Последний снимок", fontSize = 13.sp)
       }
-      Toggle("Диалог: после ответа слушать дальше", dialog) {
-        dialog = it
-        Prefs.dialog = it
+      OutlinedButton(
+          onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+          enabled = !recordingOn,
+          modifier = Modifier.weight(1f),
+      ) {
+        Text("📂 Выбрать фото", fontSize = 13.sp)
       }
-      Hint("Спрашивай о чём угодно — не только про то, что видишь. В диалоге можно уточнять без нажатия; " +
-          "закончить — «стоп», «спасибо» или просто помолчать. Голосовые команды: «запиши …» (заметка), " +
-          "«сфотографируй», «сохрани это», «включи гида», «включи диктофон», «включи переводчик».")
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      OutlinedButton(onClick = { Brain.saveAnalysis() }, enabled = !busy, modifier = Modifier.weight(1f)) {
+        Text("⭐ Сохранить разбор", fontSize = 13.sp)
+      }
+      OutlinedButton(onClick = { Brain.noteVoice() }, enabled = !busy && !recordingOn, modifier = Modifier.weight(1f)) {
+        Text("📝 Заметка", fontSize = 13.sp)
+      }
+    }
+    Hint("Сфотографируй очками как обычно («Hey Meta, сфотографируй» или кнопкой на дужке). Когда снимок " +
+        "попадёт в галерею телефона, нажми «Последний снимок» — или в «Спросить» скажи «что на фото». " +
+        "Можно и «Поделиться» любым фото → «Очки ИИ». После описания задавай уточняющие вопросы.")
+    photo?.let {
+      Image(bitmap = it.asImageBitmap(), contentDescription = "Последнее фото", modifier = Modifier.fillMaxWidth().height(200.dp))
+    }
+    if (answer.isNotBlank()) Text(answer, color = Color(0xFFDDDDDD), fontSize = 14.sp)
+  }
+
+  if (cameraFeatures) {
+    Section("Камера очков напрямую (экспериментально)") {
+      OutlinedButton(onClick = { Brain.testCamera() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+        Text("📷 Проверить камеру очков")
+      }
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = { Brain.fullPhoto() }, enabled = !busy, modifier = Modifier.weight(1f)) {
           Text("📷 Фото", fontSize = 13.sp)
         }
-        OutlinedButton(onClick = { Brain.saveView() }, enabled = !busy, modifier = Modifier.weight(1f)) {
-          Text("⭐ Сохранить", fontSize = 13.sp)
-        }
-        OutlinedButton(onClick = { Brain.noteVoice() }, enabled = !busy, modifier = Modifier.weight(1f)) {
-          Text("📝 Заметка", fontSize = 13.sp)
-        }
-      }
-      Hint("Фото — снимок в полном качестве в галерею (папка GlassAI). Сохранить — кадр с описанием от ИИ. " +
-          "Заметка — надиктуй, текст попадёт в Documents/GlassAI/Заметки.txt.")
-      photo?.let {
-        Image(
-            bitmap = it.asImageBitmap(),
-            contentDescription = "Последний кадр",
-            modifier = Modifier.fillMaxWidth().height(180.dp),
-        )
-      }
-    }
-
-    }
-    if (tab == 0) {
-    // ---------- Гид ----------
-    Section("Режим гида") {
-      Button(
-          onClick = { if (guideOn) Brain.stopGuide() else Brain.startGuide() },
-          enabled = !recordingOn,
-          modifier = Modifier.fillMaxWidth().height(52.dp),
-          colors = ButtonDefaults.buttonColors(containerColor = if (guideOn) Red else Green),
-      ) {
-        Text(if (guideOn) "■  Выключить гида" else "🧭  Включить гида", fontSize = 16.sp)
-      }
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("Смотреть раз в:", color = Color.White, fontSize = 13.sp)
-        listOf(10, 20, 30, 60).forEach { sec ->
-          OutlinedButton(
-              onClick = { guideSec = sec; Prefs.guideSec = sec },
-              colors =
-                  ButtonDefaults.outlinedButtonColors(
-                      contentColor = if (guideSec == sec) Yellow else Color(0xFF9A9AB0),
-                  ),
-          ) {
-            Text("$sec с", fontSize = 12.sp)
-          }
-        }
-      }
-      Hint("Гид сам смотрит через очки и рассказывает, когда видит интересное: вывеску, меню, цену, " +
-          "достопримечательность. Каждая находка сохраняется с фото и описанием в «Сохранённое».")
-    }
-
-    }
-    if (tab == 0) {
-    // ---------- Переводчик ----------
-    Section("ИИ-переводчик") {
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        LangPicker("Собеседник", theirLang, Modifier.weight(1f)) {
-          theirLang = it
-          Prefs.theirLang = it
-        }
-        Text("→", color = Color.White, fontSize = 20.sp)
-        LangPicker("Я", myLang, Modifier.weight(1f)) {
-          myLang = it
-          Prefs.myLang = it
-        }
-      }
-      Button(
-          onClick = { if (translatorOn) Brain.stopAll() else Brain.startTranslator() },
-          enabled = !recordingOn,
-          modifier = Modifier.fillMaxWidth().height(52.dp),
-          colors = ButtonDefaults.buttonColors(containerColor = if (translatorOn) Red else Green),
-      ) {
-        Text(if (translatorOn) "■  Выключить переводчик" else "🌐  Включить переводчик", fontSize = 16.sp)
-      }
-      OutlinedButton(onClick = { Brain.replyMine() }, enabled = !recordingOn, modifier = Modifier.fillMaxWidth()) {
-        Text("🗣  Мой ответ — перевести вслух через телефон")
-      }
-      if (big.isNotBlank()) {
-        Box(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(12.dp)).padding(16.dp)) {
-          Text(big, fontSize = 28.sp, color = Color.Black, fontWeight = FontWeight.Medium)
-        }
-      }
-    }
-
-    }
-    if (tab == 0) {
-    // ---------- Диктофон ----------
-    Section("Диктофон встреч") {
-      Button(
-          onClick = { if (recordingOn) Brain.stopRecording() else Brain.startRecording() },
-          modifier = Modifier.fillMaxWidth().height(52.dp),
-          colors = ButtonDefaults.buttonColors(containerColor = if (recordingOn) Red else Green),
-      ) {
-        Text(if (recordingOn) "■  Остановить и расшифровать" else "⏺  Начать запись", fontSize = 16.sp)
-      }
-      Toggle("Писать с микрофона очков (иначе — телефона)", recGlasses) {
-        recGlasses = it
-        Prefs.recGlassesMic = it
-      }
-      Hint("После остановки ИИ расшифрует запись и составит итог: суть, договорённости, задачи. " +
-          "Текст — в Documents/GlassAI, звук — в Recordings/GlassAI. Нужен OpenRouter или Gemini. " +
-          "Микрофон телефона на столе обычно лучше слышит всех участников.")
-    }
-
-    }
-    if (tab == 3) {
-    // ---------- Тачпад ----------
-    Section("Управление с дужки очков") {
-      Toggle("Слушать тачпад на дужке", controls) {
-        controls = it
-        Prefs.controls = it
-        Brain.applyControls()
-      }
-      Text(
-          if (controlsActive) "Связь с очками: активна ✅" else if (controls) "Связь с очками: подключаюсь…" else "Выключено",
-          color = Color(0xFFBBBBBB),
-          fontSize = 13.sp,
-      )
-      Hint("Тап — спросить (или остановить). Смахнуть вперёд — гид вкл/выкл. Смахнуть назад — заметка. " +
-          "Кнопка съёмки остаётся штатной. Функция экспериментальная: каждый жест пишется в журнал, " +
-          "по нему подстроим. Пока включено, тачпад может не управлять музыкой и громкостью.")
-    }
-
-    }
-    if (tab == 3) {
-    // ---------- Уведомления ----------
-    Section("Чтение уведомлений вслух") {
-      Toggle("Читать сообщения, звонки и напоминания в очки", readNotifs) {
-        readNotifs = it
-        Prefs.readNotifs = it
-      }
-      OutlinedButton(
-          onClick = {
-            runCatching {
-              context.startActivity(
-                  Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-              )
-            }
-          },
-          modifier = Modifier.fillMaxWidth(),
-      ) {
-        Text("Дать доступ к уведомлениям (один раз)")
-      }
-      Hint("В открывшемся списке включи «Очки ИИ». Читаются только сообщения, почта, звонки, события.")
-    }
-
-    }
-    if (tab == 0) {
-    OutlinedButton(onClick = { Brain.stopAll() }, modifier = Modifier.fillMaxWidth()) { Text("■ Стоп всё") }
-
-    }
-    if (tab == 1) {
-    // ---------- Сохранённое ----------
-    if (saved.isEmpty()) Hint("Пока пусто. Здесь появятся находки гида, заметки, фото и итоги встреч.")
-    if (saved.isNotEmpty()) {
-      Section("Сохранённое (${saved.size})") {
-        saved.take(100).forEach { item ->
-          Text(
-              "${item.time} · ${item.kind}: ${item.text.take(260)}",
-              color = Color(0xFFDDDDDD),
-              fontSize = 14.sp,
-              modifier = Modifier.fillMaxWidth().clickable { openSaved(context, item) },
-          )
-          HorizontalDivider()
-        }
-        Hint("Нажми на запись, чтобы открыть фото или текст.")
-      }
-    }
-
-    }
-    if (tab == 2) {
-    // ---------- Журнал ----------
-    Section("Журнал (${log.size})") {
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(
-            onClick = {
-              val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-              cm.setPrimaryClip(android.content.ClipData.newPlainText("Журнал Очки ИИ", Brain.logAsText()))
-              Toast.makeText(context, "Журнал скопирован", Toast.LENGTH_SHORT).show()
-            },
+            onClick = { if (guideOn) Brain.stopGuide() else Brain.startGuide() },
+            enabled = !recordingOn,
             modifier = Modifier.weight(1f),
         ) {
-          Text("📋 Копировать всё")
+          Text(if (guideOn) "■ Гид" else "🧭 Гид", fontSize = 13.sp)
         }
-        OutlinedButton(onClick = { Brain.clearLog() }, modifier = Modifier.weight(1f)) { Text("Очистить") }
-      }
-      if (log.isEmpty()) Hint("Пока пусто. Сюда пишутся вопросы, ответы и ошибки.")
-      log.forEach { line ->
-        Text("${line.who}: ${line.text}", color = Color(0xFFDDDDDD), fontSize = 13.sp)
       }
     }
+  }
+
+  Section("Диктофон встреч") {
+    Button(
+        onClick = { if (recordingOn) Brain.stopRecording() else Brain.startRecording() },
+        modifier = Modifier.fillMaxWidth().height(52.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = if (recordingOn) Red else Green),
+    ) {
+      Text(if (recordingOn) "■  Остановить и расшифровать" else "⏺  Начать запись", fontSize = 16.sp)
     }
-    if (tab == 3) {
-    Section("Работа в фоне и с заблокированным экраном") {
-      OutlinedButton(
-          onClick = {
-            runCatching {
-              context.startActivity(
-                  Intent(
-                          Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                          Uri.parse("package:" + context.packageName),
-                      )
-                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-              )
-            }
-          },
-          modifier = Modifier.fillMaxWidth(),
-      ) {
-        Text("1. Отключить экономию батареи для приложения")
+    Toggle("Писать с микрофона очков (иначе — телефона)", recGlasses) {
+      recGlasses = it
+      Prefs.recGlassesMic = it
+    }
+    Hint("После остановки ИИ расшифрует запись и составит итог: суть, договорённости, задачи. " +
+        "Текст — в Documents/GlassAI, звук — в Recordings/GlassAI. Нужен OpenRouter или Gemini.")
+  }
+
+  Section("Чтение уведомлений вслух") {
+    Toggle("Читать сообщения, звонки и напоминания в очки", readNotifs) {
+      readNotifs = it
+      Prefs.readNotifs = it
+    }
+    OutlinedButton(
+        onClick = {
+          runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+          }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+      Text("Дать доступ к уведомлениям (один раз)")
+    }
+  }
+}
+
+// ---------- Переводчик ----------
+
+@Composable
+private fun TranslatorTab(translatorOn: Boolean, recordingOn: Boolean) {
+  val big by Brain.bigText.collectAsState()
+  val translit by Brain.bigTranslit.collectAsState()
+  var myLang by remember { mutableStateOf(Prefs.myLang) }
+  var theirLang by remember { mutableStateOf(Prefs.theirLang) }
+  var theirLang2 by remember { mutableStateOf(Prefs.theirLang2) }
+  var twoWay by remember { mutableStateOf(Prefs.twoWay) }
+  var engine by remember { mutableStateOf(Prefs.engine) }
+  var pause by remember { mutableStateOf(Prefs.pauseMs) }
+  var typed by remember { mutableStateOf("") }
+
+  Section("Переводчик") {
+    Text("Языки собеседника", color = Color.White, fontSize = 14.sp)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      LangPicker("1", theirLang, false, Modifier.weight(1f)) {
+        theirLang = it
+        Prefs.theirLang = it
       }
-      OutlinedButton(
-          onClick = {
-            runCatching {
-              context.startActivity(
-                  Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + context.packageName))
-                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-              )
-            }
-          },
-          modifier = Modifier.fillMaxWidth(),
-      ) {
-        Text("2. Открыть настройки приложения")
+      LangPicker("2", theirLang2, true, Modifier.weight(1f)) {
+        theirLang2 = it
+        Prefs.theirLang2 = it
       }
-      Hint("В настройках приложения (Realme): «Расход батареи» → разреши фоновую активность и автозапуск. " +
-          "В списке недавних приложений потяни карточку «Очки ИИ» вниз и нажми «Закрепить» (замок), " +
-          "чтобы система её не выгружала. С заблокированным экраном пользуйся кнопками в уведомлении " +
-          "или тачпадом на дужке.")
     }
-    AiSettings()
+    LangPicker("Мой язык", myLang, false, Modifier.fillMaxWidth()) {
+      myLang = it
+      Prefs.myLang = it
     }
-    Spacer(Modifier.height(40.dp))
+    Toggle("В обе стороны: мои фразы переводить вслух через телефон", twoWay) {
+      twoWay = it
+      Prefs.twoWay = it
+    }
+    Text("Как слушать:", color = Color.White, fontSize = 14.sp)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      RadioButton(selected = engine == "ai", onClick = { engine = "ai"; Prefs.engine = "ai" })
+      Text("ИИ (точнее, сам понимает язык)", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      RadioButton(selected = engine == "google", onClick = { engine = "google"; Prefs.engine = "google" })
+      Text("Google (быстрее, дешевле)", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+      Text("Конец фразы после паузы:", color = Color.White, fontSize = 13.sp)
+      listOf(700 to "0,7 с", 1000 to "1 с", 1600 to "1,6 с").forEach { (ms, title) ->
+        OutlinedButton(
+            onClick = { pause = ms; Prefs.pauseMs = ms },
+            contentPadding = PaddingValues(4.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = if (pause == ms) Yellow else Gray),
+        ) {
+          Text(title, fontSize = 12.sp)
+        }
+      }
+    }
+    Button(
+        onClick = { if (translatorOn) Brain.stopAll() else Brain.startTranslator() },
+        enabled = !recordingOn,
+        modifier = Modifier.fillMaxWidth().height(56.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = if (translatorOn) Red else Green),
+    ) {
+      Text(if (translatorOn) "■  Выключить переводчик" else "🌐  Включить переводчик", fontSize = 17.sp)
+    }
+    Hint("Собеседника слышишь в очках на своём языке. Если включено «в обе стороны», просто говори по-своему — " +
+        "перевод прозвучит из телефона и появится крупно ниже. Разговор сохраняется в «Сохранённое». " +
+        "Режим «ИИ» не работает с провайдером Claude.")
+  }
+
+  Section("Мой ответ вручную") {
+    OutlinedButton(onClick = { Brain.replyMine() }, enabled = !recordingOn, modifier = Modifier.fillMaxWidth()) {
+      Text("🗣  Сказать голосом")
+    }
+    OutlinedTextField(
+        value = typed,
+        onValueChange = { typed = it },
+        label = { Text("Или напиши (в шумном месте)") },
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedButton(
+        onClick = {
+          Brain.replyTyped(typed)
+          typed = ""
+        },
+        enabled = typed.isNotBlank() && !recordingOn,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+      Text("➜  Перевести и сказать")
+    }
+  }
+
+  if (big.isNotBlank()) {
+    Box(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(12.dp)).padding(16.dp)) {
+      Column {
+        Text(big, fontSize = 30.sp, color = Color.Black, fontWeight = FontWeight.Medium)
+        if (translit.isNotBlank()) Text(translit, fontSize = 16.sp, color = Color(0xFF555555))
+      }
+    }
+  }
+}
+
+// ---------- Сохранённое ----------
+
+@Composable
+private fun SavedTab(context: Context, saved: List<Library.Item>) {
+  Section("Сохранённое (${saved.size})") {
+    if (saved.isEmpty()) Hint("Пока пусто. Здесь появятся разборы фото, заметки, разговоры и итоги встреч.")
+    saved.take(100).forEach { item ->
+      Text(
+          "${item.time} · ${item.kind}: ${item.text.take(260)}",
+          color = Color(0xFFDDDDDD),
+          fontSize = 14.sp,
+          modifier = Modifier.fillMaxWidth().clickable { openSaved(context, item) },
+      )
+      HorizontalDivider()
+    }
+    if (saved.isNotEmpty()) Hint("Нажми на запись, чтобы открыть фото или текст.")
   }
 }
 
@@ -473,6 +477,117 @@ private fun openSaved(context: Context, item: Library.Item) {
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK),
     )
   }
+}
+
+// ---------- Журнал ----------
+
+@Composable
+private fun LogTab(context: Context, log: List<Brain.Line>) {
+  Section("Журнал (${log.size})") {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      OutlinedButton(
+          onClick = {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("Журнал Очки ИИ", Brain.logAsText()))
+            Toast.makeText(context, "Журнал скопирован", Toast.LENGTH_SHORT).show()
+          },
+          modifier = Modifier.weight(1f),
+      ) {
+        Text("📋 Копировать всё")
+      }
+      OutlinedButton(onClick = { Brain.clearLog() }, modifier = Modifier.weight(1f)) { Text("Очистить") }
+    }
+    if (log.isEmpty()) Hint("Пока пусто. Сюда пишутся вопросы, ответы и ошибки.")
+    log.forEach { line -> Text("${line.who}: ${line.text}", color = Color(0xFFDDDDDD), fontSize = 13.sp) }
+  }
+}
+
+// ---------- Настройки ----------
+
+@Composable
+private fun SettingsTab(
+    context: Context,
+    onRegister: () -> Unit,
+    onCameraPermission: () -> Unit,
+    cameraFeatures: Boolean,
+    onCameraFeatures: (Boolean) -> Unit,
+) {
+  val initialized by Glasses.initialized.collectAsState()
+  val controlsActive by Glasses.controlsActive.collectAsState()
+  var controls by remember { mutableStateOf(Prefs.controls) }
+  var rate by remember { mutableStateOf(Prefs.speechRate) }
+
+  Section("Голос") {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+      Text("Скорость:", color = Color.White, fontSize = 13.sp)
+      listOf(0.85f to "медл.", 1.0f to "обычн.", 1.2f to "быстр.", 1.4f to "оч. быстр.").forEach { (r, title) ->
+        OutlinedButton(
+            onClick = { rate = r; Prefs.speechRate = r },
+            contentPadding = PaddingValues(4.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = if (rate == r) Yellow else Gray),
+        ) {
+          Text(title, fontSize = 11.sp)
+        }
+      }
+    }
+  }
+
+  Section("Работа в фоне и с заблокированным экраном") {
+    OutlinedButton(
+        onClick = {
+          runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + context.packageName))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+          }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+      Text("1. Отключить экономию батареи для приложения")
+    }
+    OutlinedButton(
+        onClick = {
+          runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + context.packageName))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+          }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+      Text("2. Открыть настройки приложения")
+    }
+    Hint("В настройках приложения (Realme): «Расход батареи» → разреши фоновую активность и автозапуск. " +
+        "В списке недавних приложений потяни карточку «Очки ИИ» вниз и нажми замок. С заблокированным " +
+        "экраном пользуйся кнопками в уведомлении: «Спросить», «Фото», «Переводчик».")
+  }
+
+  Section("Камера очков напрямую") {
+    Toggle("Включить функции камеры очков", cameraFeatures, onCameraFeatures)
+    Hint("Сейчас очки отвечают «нужно обновление», поэтому эти функции выключены. Когда Meta обновит " +
+        "компонент для сторонних приложений, включи — появятся «Проверить камеру», гид, фото и тачпад.")
+    if (cameraFeatures) {
+      if (initialized) RegistrationLine()
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = onRegister, modifier = Modifier.weight(1f)) { Text("Подключить") }
+        OutlinedButton(onClick = onCameraPermission, modifier = Modifier.weight(1f)) { Text("Разрешить камеру") }
+      }
+      Toggle("Тачпад на дужке", controls) {
+        controls = it
+        Prefs.controls = it
+        Brain.applyControls()
+      }
+      Text(
+          if (controlsActive) "Связь с очками: активна ✅" else if (controls) "Связь с очками: подключаюсь…" else "Тачпад выключен",
+          color = Color(0xFFBBBBBB),
+          fontSize = 13.sp,
+      )
+    }
+  }
+
+  AiSettings()
 }
 
 @Composable
@@ -526,13 +641,13 @@ private fun AiSettings() {
       "openrouter" -> {
         KeyField("Ключ OpenRouter (sk-or-…)", orKey) { orKey = it; Prefs.openrouterKey = it }
         ModelField(orModel) { orModel = it; Prefs.openrouterModel = it }
-        Hint("google/gemini-3.1-flash-lite — быстро и очень дёшево. Умнее: google/gemini-3.5-flash " +
-            "(список на openrouter.ai/models). Модель должна понимать картинки, а для диктофона — и звук.")
+        Hint("google/gemini-3.1-flash-lite — быстро и очень дёшево, понимает фото и звук. Умнее: " +
+            "google/gemini-3.5-flash (список на openrouter.ai/models).")
       }
       "claude" -> {
         KeyField("Ключ Claude API (sk-ant-…)", claudeKey) { claudeKey = it; Prefs.claudeKey = it }
         ModelField(claudeModel) { claudeModel = it; Prefs.claudeModel = it }
-        Hint("claude-haiku-5-5 — быстро и дёшево; claude-sonnet-5-5 — умнее. Диктофон с Claude не работает.")
+        Hint("claude-haiku-5-5 — быстро и дёшево. Claude не слушает звук: диктофон и переводчик в режиме «ИИ» с ним не работают.")
       }
       else -> {
         KeyField("Ключ Gemini API (AIza…)", geminiKey) { geminiKey = it; Prefs.geminiKey = it }
@@ -568,16 +683,15 @@ private fun KeyField(label: String, value: String, onChange: (String) -> Unit) {
 }
 
 @Composable
-private fun LangPicker(title: String, code: String, modifier: Modifier, onPick: (String) -> Unit) {
+private fun LangPicker(title: String, code: String, allowNone: Boolean, modifier: Modifier, onPick: (String) -> Unit) {
   var open by remember { mutableStateOf(false) }
   Box(modifier) {
     OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
-      Text("$title: ${Langs.name(code)}", fontSize = 13.sp)
+      Text("$title: ${if (code.isBlank()) "нет" else Langs.name(code)}", fontSize = 13.sp)
     }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-      Langs.all.forEach { (c, n) ->
-        DropdownMenuItem(text = { Text(n) }, onClick = { onPick(c); open = false })
-      }
+      if (allowNone) DropdownMenuItem(text = { Text("нет") }, onClick = { onPick(""); open = false })
+      Langs.all.forEach { (c, n) -> DropdownMenuItem(text = { Text(n) }, onClick = { onPick(c); open = false }) }
     }
   }
 }
@@ -595,5 +709,5 @@ private fun Section(title: String, content: @Composable () -> Unit) {
 
 @Composable
 private fun Hint(text: String) {
-  Text(text, fontSize = 13.sp, color = Color(0xFF9A9AB0))
+  Text(text, fontSize = 13.sp, color = Gray)
 }

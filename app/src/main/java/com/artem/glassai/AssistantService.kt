@@ -24,6 +24,7 @@ class AssistantService : Service() {
     const val ACTION_TRANSLATE = "com.artem.glassai.TRANSLATE"
     const val ACTION_REPLY = "com.artem.glassai.REPLY"
     const val ACTION_STOP = "com.artem.glassai.STOP"
+    const val ACTION_PHOTO = "com.artem.glassai.PHOTO"
     const val ACTION_EXIT = "com.artem.glassai.EXIT"
 
     fun start(context: Context) {
@@ -88,7 +89,13 @@ class AssistantService : Service() {
       return START_NOT_STICKY
     }
     when (intent?.action) {
-      ACTION_ASK -> if (Brain.recordingOn.value) Brain.stopRecording() else Brain.ask()
+      ACTION_ASK ->
+          when {
+            Brain.recordingOn.value -> Brain.stopRecording()
+            Brain.busy.value && !Brain.translatorOn.value -> Brain.stopAll()
+            else -> Brain.ask()
+          }
+      ACTION_PHOTO -> Brain.analyzeLatest()
       ACTION_TRANSLATE -> if (Brain.translatorOn.value) Brain.stopAll() else Brain.startTranslator()
       ACTION_REPLY -> Brain.replyMine()
       ACTION_STOP -> Brain.stopAll()
@@ -122,13 +129,14 @@ class AssistantService : Service() {
     return Notification.Builder(this, CHANNEL)
         .setSmallIcon(R.drawable.ic_notif)
         .setContentTitle("Очки ИИ готовы")
-        .setContentText("Спросить — вопрос + кадр с очков. Переводчик — вкл/выкл.")
+        .setContentText("Спросить (ещё раз — стоп) · Фото — разбор последнего снимка · Переводчик — вкл/выкл")
         .setContentIntent(open)
         .setOngoing(true)
         .setVisibility(Notification.VISIBILITY_PUBLIC)
         .addAction(Notification.Action.Builder(icon, "🎤 Спросить", action(ACTION_ASK, 1)).build())
+        .addAction(Notification.Action.Builder(icon, "🖼 Фото", action(ACTION_PHOTO, 4)).build())
         .addAction(Notification.Action.Builder(icon, "🌐 Переводчик", action(ACTION_TRANSLATE, 2)).build())
-        .addAction(Notification.Action.Builder(icon, "■ Стоп", action(ACTION_STOP, 3)).build())
+
         .build()
   }
 }

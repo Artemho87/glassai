@@ -59,6 +59,36 @@ object Prefs {
     get() = str("theirLang", "th-TH")
     set(v) = put("theirLang", v)
 
+  /** Второй язык собеседника ("" — нет) */
+  var theirLang2: String
+    get() = str("theirLang2", "en-US")
+    set(v) = put("theirLang2", v)
+
+  /** Переводчик в обе стороны: мои фразы переводятся и звучат через телефон */
+  var twoWay: Boolean
+    get() = bool("twoWay", true)
+    set(v) = put("twoWay", v)
+
+  /** Как слушает переводчик: "google" — распознавание Google, "ai" — ИИ слушает звук сам */
+  var engine: String
+    get() = str("engine", "ai")
+    set(v) = put("engine", v)
+
+  /** Пауза, после которой фраза считается законченной, мс */
+  var pauseMs: Int
+    get() = str("pauseMs", "1000").toIntOrNull() ?: 1000
+    set(v) = put("pauseMs", v.toString())
+
+  /** Скорость голоса */
+  var speechRate: Float
+    get() = str("speechRate", "1.0").toFloatOrNull() ?: 1.0f
+    set(v) = put("speechRate", v.toString())
+
+  /** Функции, которым нужна прямая связь с камерой очков (сейчас не работают: нужно обновление очков) */
+  var cameraFeatures: Boolean
+    get() = bool("cameraFeatures", false)
+    set(v) = put("cameraFeatures", v)
+
   /** После ответа слушать следующий вопрос без нажатия */
   var dialog: Boolean
     get() = bool("dialog", true)

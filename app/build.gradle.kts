@@ -14,8 +14,8 @@ android {
     applicationId = "com.artem.glassai"
     minSdk = 31
     targetSdk = 36
-    versionCode = 6
-    versionName = "2.1"
+    versionCode = 7
+    versionName = "3.0"
 
     // Только 64-битные ARM-телефоны (все современные Android): APK заметно меньше
     ndk { abiFilters += "arm64-v8a" }
