@@ -7,6 +7,10 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import com.meta.wearable.dat.camera.Camera
 import com.meta.wearable.dat.camera.addCamera
+import com.meta.wearable.dat.camera.photo.types.PhotoQuality
+import com.meta.wearable.dat.camera.photo.types.PhotoResolution
+import com.meta.wearable.dat.camera.photo.types.PhotoState
+import com.meta.wearable.dat.camera.removeCamera
 import com.meta.wearable.dat.camera.types.PhotoData
 import com.meta.wearable.dat.camera.types.StreamConfiguration
 import com.meta.wearable.dat.camera.types.StreamState
@@ -15,24 +19,50 @@ import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
+import com.meta.wearable.dat.core.types.Device
+import com.meta.wearable.dat.core.types.LinkState
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
+import com.meta.wearable.dat.inputs.addInputs
+import com.meta.wearable.dat.inputs.types.InputEvent
+import com.meta.wearable.dat.inputs.types.InputSource
+import com.meta.wearable.dat.inputs.types.InputsConfiguration
 import java.io.ByteArrayInputStream
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Камера очков через Meta Wearables Device Access Toolkit.
+ * Очки через Meta Wearables Device Access Toolkit: камера, тачпад на дужке, заряд.
  *
- * Важно: камеру занимаем только на 2–4 секунды ради одного кадра, потом сразу отпускаем.
- * Поэтому штатная съёмка («Hey Meta, сфотографируй», кнопка на дужке) работает как раньше.
+ * Камеру занимаем только на несколько секунд ради одного кадра и сразу отпускаем,
+ * поэтому штатная съёмка («Hey Meta», кнопка на дужке) продолжает работать.
  */
 object Glasses {
 
   val initialized = MutableStateFlow(false)
+
+  /** Состояние очков: заряд, надеты ли, на зарядке ли. null — очки не найдены. */
+  val device = MutableStateFlow<Device?>(null)
+
+  /** true, пока приложение слушает тачпад на дужке */
+  val controlsActive = MutableStateFlow(false)
+
+  private val mutex = Mutex()
+  @Volatile private var held: DeviceSession? = null
 
   fun init(context: Context) {
     if (initialized.value) return
@@ -54,104 +84,272 @@ object Glasses {
     return granted
   }
 
-  /**
-   * Делает один снимок с камеры очков. Бросает GlassesException с понятным текстом.
-   * @param onStep сообщает этапы (для экрана и диагностики)
-   * @param onStreaming вызывается, когда видео с очков пошло (или когда всё сломалось) —
-   *   после этого можно включать микрофон очков, не мешая запуску камеры.
-   */
-  suspend fun capture(onStep: (String) -> Unit = {}, onStreaming: () -> Unit = {}): Bitmap {
-   try {
+  // ---------------- сеанс связи с очками ----------------
+
+  private suspend fun openSession(onStep: (String) -> Unit): DeviceSession {
+    onStep("подключаюсь к очкам")
+    val createdResult = Wearables.createSession(AutoDeviceSelector())
+    val s =
+        createdResult.getOrNull()
+            ?: throw GlassesException(
+                "Очки не найдены: ${createdResult.errorOrNull()?.description ?: "нет подключения"}",
+            )
+    var lastError: String? = null
+    val errJob =
+        CoroutineScope(Dispatchers.Main).launch { s.errors.collect { lastError = it.description } }
+    try {
+      s.start()
+      val st =
+          withTimeoutOrNull(20_000) {
+            s.state.first { it == DeviceSessionState.STARTED || it == DeviceSessionState.STOPPED }
+          }
+      if (st != DeviceSessionState.STARTED) {
+        runCatching { s.stop() }
+        throw GlassesException(
+            "Очки не ответили (сеанс: ${st ?: s.state.value}${lastError?.let { ", $it" } ?: ""}). " +
+                "Надень очки, открой дужки, проверь Bluetooth",
+        )
+      }
+    } finally {
+      errJob.cancel()
+    }
+    return s
+  }
+
+  /** Выполняет работу в сеансе: в постоянном (если включено управление с дужки) или во временном. */
+  private suspend fun <T> withSession(
+      onStep: (String) -> Unit,
+      block: suspend (DeviceSession) -> T,
+  ): T =
+      mutex.withLock {
+        if (!initialized.value) throw GlassesException("Очки ещё не подключены к приложению")
+        val h = held
+        if (h != null) {
+          if (h.state.value != DeviceSessionState.STARTED) {
+            throw GlassesException("Очки на паузе (сеанс: ${h.state.value}). Надень их и повтори")
+          }
+          block(h)
+        } else {
+          val s = openSession(onStep)
+          try {
+            block(s)
+          } finally {
+            runCatching { s.stop() }
+          }
+        }
+      }
+
+  private suspend fun requireCamera(onStep: (String) -> Unit) {
     onStep("проверяю подключение")
     if (!initialized.value) throw GlassesException("Очки ещё не подключены к приложению")
     if (!isCameraAllowed()) {
       throw GlassesException("Нет доступа к камере очков: в приложении нажми «Разрешить камеру»")
     }
+  }
 
-    var session: DeviceSession? = null
-    var camera: Camera? = null
-    var errJob: kotlinx.coroutines.Job? = null
+  // ---------------- быстрый кадр для ИИ ----------------
+
+  /**
+   * Быстрый кадр (из видеопотока) для ИИ.
+   *
+   * @param onStep этапы для экрана
+   * @param onStreaming вызывается, когда видео пошло или всё сломалось — после этого можно
+   *   включать микрофон очков, не мешая запуску камеры
+   */
+  suspend fun capture(onStep: (String) -> Unit = {}, onStreaming: () -> Unit = {}): Bitmap {
     try {
-      val createdResult = Wearables.createSession(AutoDeviceSelector())
-      val created: DeviceSession =
-          createdResult.getOrNull()
-              ?: throw GlassesException(
-                  "Очки не найдены: ${createdResult.errorOrNull()?.description ?: "нет подключения"}",
-              )
-      session = created
-      onStep("подключаюсь к очкам")
-      created.start()
+      requireCamera(onStep)
+      return withSession(onStep) { session ->
+        val camResult =
+            session.addCamera(
+                StreamConfiguration(
+                    videoQuality = VideoQuality.MEDIUM,
+                    frameRate = 15,
+                    // сжатый поток не встаёт на паузу, когда приложение свёрнуто
+                    compressVideo = true,
+                ),
+            )
+        val cam: Camera =
+            camResult.getOrNull()
+                ?: throw GlassesException("Камера занята: ${camResult.errorOrNull()?.description}")
+        try {
+          val stream = cam.stream
+          onStep("запускаю камеру")
+          var startError: String? = null
+          stream.start().onFailure { e, _ -> startError = e.description }
+          startError?.let { throw GlassesException("Камера не запустилась: $it") }
 
-      var lastSessionError: String? = null
-      errJob =
-          kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            created.errors.collect { lastSessionError = it.description }
+          val streamState =
+              withTimeoutOrNull(20_000) {
+                stream.state.first { it == StreamState.STREAMING || it == StreamState.CLOSED }
+              }
+          if (streamState != StreamState.STREAMING) {
+            throw GlassesException("Видео с очков не пошло (поток: ${streamState ?: stream.state.value})")
           }
-      val sessionState =
-          withTimeoutOrNull(20_000) {
-            created.state.first {
-              it == DeviceSessionState.STARTED || it == DeviceSessionState.STOPPED
-            }
-          }
-      if (sessionState != DeviceSessionState.STARTED) {
-        errJob?.cancel()
-        throw GlassesException(
-            "Очки не ответили (сеанс: $sessionState${lastSessionError?.let { ", $it" } ?: ""}). " +
-                "Надень очки, открой дужки, проверь Bluetooth",
-        )
+          onStreaming()
+          onStep("снимаю кадр")
+          delay(600) // даём камере выставить экспозицию
+
+          val photoResult = stream.capturePhoto()
+          val photo: PhotoData =
+              photoResult.getOrNull()
+                  ?: throw GlassesException(
+                      "Не удалось снять кадр: ${photoResult.errorOrNull()?.description}",
+                  )
+          decode(photo) ?: throw GlassesException("Кадр пришёл повреждённым")
+        } finally {
+          runCatching { cam.close() }
+          runCatching { session.removeCamera() }
+        }
       }
+    } finally {
+      onStreaming()
+    }
+  }
 
-      // compressVideo = true: сжатый поток не ставится на паузу, когда приложение свёрнуто
-      // (например, вопрос задан кнопкой из уведомления на заблокированном экране).
+  // ---------------- фото в полном качестве ----------------
+
+  /** Снимок в полном разрешении камеры очков. Возвращает байты готового файла (JPEG/HEIC). */
+  suspend fun captureFull(onStep: (String) -> Unit = {}): ByteArray {
+    requireCamera(onStep)
+    return withSession(onStep) { session ->
       val camResult =
-          created.addCamera(
-              StreamConfiguration(
-                  videoQuality = VideoQuality.MEDIUM,
-                  frameRate = 15,
-                  compressVideo = true,
-              ),
-          )
+          session.addCamera(StreamConfiguration(videoQuality = VideoQuality.LOW, frameRate = 15))
       val cam: Camera =
           camResult.getOrNull()
               ?: throw GlassesException("Камера занята: ${camResult.errorOrNull()?.description}")
-      camera = cam
-      val stream = cam.stream
-      onStep("запускаю камеру")
-
-      var startError: String? = null
-      stream.start().onFailure { e, _ -> startError = e.description }
-      startError?.let { throw GlassesException("Камера не запустилась: $it") }
-
-      val streamState =
-          withTimeoutOrNull(20_000) {
-            stream.state.first { it == StreamState.STREAMING || it == StreamState.CLOSED }
+      try {
+        coroutineScope {
+          onStep("готовлю фотокамеру")
+          val photo = cam.photo
+          val result = CompletableDeferred<ByteArray>()
+          val dataJob = launch { photo.photoStream.collect { result.complete(it.imageData) } }
+          val errJob =
+              launch {
+                photo.errors.collect {
+                  result.completeExceptionally(GlassesException("Фото не снялось: ${it.description}"))
+                }
+              }
+          val progressJob =
+              launch { photo.transferProgressStream.collect { onStep("передаю фото с очков") } }
+          try {
+            val st = withTimeoutOrNull(15_000) { photo.state.first { it == PhotoState.STARTED } }
+            if (st == null) throw GlassesException("Фотокамера не запустилась (${photo.state.value})")
+            onStep("снимаю в полном качестве")
+            photo.capturePhoto(PhotoResolution.FULL, PhotoQuality.HIGH)
+            withTimeoutOrNull(45_000) { result.await() }
+                ?: throw GlassesException("Фото не пришло с очков за 45 секунд")
+          } finally {
+            dataJob.cancel()
+            errJob.cancel()
+            progressJob.cancel()
+            runCatching { photo.stop() }
           }
-      if (streamState != StreamState.STREAMING) {
-        throw GlassesException(
-            "Видео с очков не пошло (поток: ${streamState ?: stream.state.value}" +
-                "${lastSessionError?.let { ", $it" } ?: ""})",
-        )
+        }
+      } finally {
+        runCatching { cam.close() }
+        runCatching { session.removeCamera() }
       }
-      errJob?.cancel()
-      onStreaming()
-      onStep("снимаю кадр")
-
-      delay(600) // даём камере выставить экспозицию
-
-      val photoResult = stream.capturePhoto()
-      val photo: PhotoData =
-          photoResult.getOrNull()
-              ?: throw GlassesException("Не удалось снять кадр: ${photoResult.errorOrNull()?.description}")
-      return decode(photo) ?: throw GlassesException("Кадр пришёл повреждённым")
-    } finally {
-      errJob?.cancel()
-      runCatching { camera?.close() }
-      runCatching { session?.stop() }
     }
-   } finally {
-     onStreaming()
-   }
   }
+
+  // ---------------- тачпад на дужке ----------------
+
+  /**
+   * Держит постоянный сеанс с очками и слушает тачпад на дужке.
+   * Кнопку съёмки не трогаем — она остаётся штатной.
+   * События: "tap", "nav_UP/DOWN/LEFT/RIGHT", "capture_…", "button", "back".
+   */
+  fun startControls(
+      scope: CoroutineScope,
+      onEvent: (String) -> Unit,
+      onLog: (String) -> Unit,
+      onGiveUp: () -> Unit,
+  ): Job =
+      scope.launch {
+        var failures = 0
+        while (isActive) {
+          var mine: DeviceSession? = null
+          try {
+            val s =
+                mutex.withLock {
+                  val opened = openSession {}
+                  held = opened
+                  mine = opened
+                  opened
+                }
+            val res =
+                s.addInputs(
+                    InputsConfiguration(sources = setOf(InputSource.CAPTOUCH), consumeBack = false),
+                )
+            val inputs =
+                res.getOrNull()
+                    ?: throw GlassesException("тачпад не подключился: ${res.errorOrNull()?.description}")
+            controlsActive.value = true
+            failures = 0
+            onLog("Управление с дужки включено")
+            coroutineScope {
+              val ev =
+                  launch {
+                    inputs.events.collect { e ->
+                      val name =
+                          when (e) {
+                            is InputEvent.Select -> "tap"
+                            is InputEvent.Nav -> "nav_${e.direction.name}"
+                            is InputEvent.Capture -> "capture_${e.pressType.name}"
+                            is InputEvent.Button -> "button"
+                            is InputEvent.Back -> "back"
+                            else -> "other"
+                          }
+                      onEvent(name)
+                    }
+                  }
+              val er =
+                  launch {
+                    inputs.errors.collect { err -> if (err != null) onLog("Тачпад: ${err.description}") }
+                  }
+              s.state.first { it == DeviceSessionState.STOPPED }
+              ev.cancel()
+              er.cancel()
+            }
+          } catch (c: CancellationException) {
+            throw c
+          } catch (e: Exception) {
+            failures++
+            onLog("Управление с дужки: ${e.message}")
+          } finally {
+            controlsActive.value = false
+            if (held === mine) held = null
+            runCatching { mine?.stop() }
+          }
+          if (failures >= 4) {
+            onLog("Управление с дужки выключено: очки не отвечают")
+            onGiveUp()
+            break
+          }
+          delay(if (failures == 0) 5_000L else 15_000L * failures)
+        }
+      }
+
+  // ---------------- заряд и состояние ----------------
+
+  fun startDeviceMonitor(scope: CoroutineScope): Job =
+      scope.launch {
+        Wearables.devices.collectLatest { ids ->
+          val flows = ids.mapNotNull { Wearables.devicesMetadata[it] }
+          if (flows.isEmpty()) {
+            device.value = null
+          } else {
+            combine(flows) { it.toList() }
+                .collect { list ->
+                  device.value =
+                      list.firstOrNull { it.linkState == LinkState.CONNECTED } ?: list.firstOrNull()
+                }
+          }
+        }
+      }
+
+  // ---------------- разбор снимка ----------------
 
   private fun decode(photo: PhotoData): Bitmap? =
       when (photo) {
@@ -160,10 +358,23 @@ object Glasses {
           val buf = photo.data.duplicate().apply { rewind() }
           val bytes = ByteArray(buf.remaining())
           buf.get(bytes)
-          val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-          if (bmp == null) null else rotateByExif(bmp, bytes)
+          decodeBytes(bytes)
         }
       }
+
+  /** Превращает байты фото в картинку с правильным поворотом. */
+  fun decodeBytes(bytes: ByteArray, maxSide: Int = 0): Bitmap? {
+    val opts = BitmapFactory.Options()
+    if (maxSide > 0) {
+      val probe = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeByteArray(bytes, 0, bytes.size, probe)
+      var sample = 1
+      while (maxOf(probe.outWidth, probe.outHeight) / (sample * 2) >= maxSide) sample *= 2
+      opts.inSampleSize = sample
+    }
+    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
+    return rotateByExif(bmp, bytes)
+  }
 
   private fun rotateByExif(bmp: Bitmap, bytes: ByteArray): Bitmap {
     val orientation =

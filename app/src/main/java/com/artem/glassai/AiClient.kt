@@ -10,16 +10,36 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Запросы к ИИ: Claude (Anthropic API) или Gemini (Google AI Studio API). */
+/** Запросы к ИИ: OpenRouter, Claude (Anthropic API) или Gemini (Google AI Studio API). */
 object AiClient {
 
-  suspend fun ask(system: String, text: String, image: Bitmap?, maxTokens: Int = 400): String =
+  /** Одна прошлая реплика разговора: вопрос и ответ */
+  data class Turn(val user: String, val assistant: String)
+
+  /**
+   * @param history прошлые реплики (чтобы ИИ помнил разговор)
+   * @param audioAac звук в формате AAC — для расшифровки диктофона (Claude звук не понимает)
+   */
+  suspend fun ask(
+      system: String,
+      text: String,
+      image: Bitmap? = null,
+      maxTokens: Int = 400,
+      history: List<Turn> = emptyList(),
+      audioAac: ByteArray? = null,
+  ): String =
       withContext(Dispatchers.IO) {
         val jpeg = image?.let { toBase64Jpeg(it) }
+        val audio = audioAac?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
         when (Prefs.provider) {
-          "gemini" -> gemini(system, text, jpeg, maxTokens)
-          "claude" -> claude(system, text, jpeg, maxTokens)
-          else -> openrouter(system, text, jpeg, maxTokens)
+          "gemini" -> gemini(system, text, jpeg, maxTokens, history, audio)
+          "claude" -> {
+            if (audio != null) {
+              error("Claude не умеет слушать звук. Для диктофона выбери OpenRouter или Gemini в «Настройках ИИ»")
+            }
+            claude(system, text, jpeg, maxTokens, history)
+          }
+          else -> openrouter(system, text, jpeg, maxTokens, history, audio)
         }
       }
 
@@ -31,10 +51,22 @@ object AiClient {
     return ask(system, text, null, 300)
   }
 
-  // ---------- OpenRouter (формат OpenAI, любая модель с поддержкой картинок) ----------
-  private fun openrouter(system: String, text: String, jpeg: String?, maxTokens: Int): String {
+  // ---------- OpenRouter (формат OpenAI) ----------
+  private fun openrouter(
+      system: String,
+      text: String,
+      jpeg: String?,
+      maxTokens: Int,
+      history: List<Turn>,
+      audio: String?,
+  ): String {
     val key = Prefs.openrouterKey
     require(key.isNotBlank()) { "Не указан ключ OpenRouter (раздел «Настройки ИИ»)" }
+    val messages = JSONArray().put(JSONObject().put("role", "system").put("content", system))
+    history.forEach {
+      messages.put(JSONObject().put("role", "user").put("content", it.user))
+      messages.put(JSONObject().put("role", "assistant").put("content", it.assistant))
+    }
     val userContent = JSONArray()
     userContent.put(JSONObject().put("type", "text").put("text", text))
     if (jpeg != null) {
@@ -44,18 +76,21 @@ object AiClient {
               .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$jpeg")),
       )
     }
+    if (audio != null) {
+      userContent.put(
+          JSONObject()
+              .put("type", "input_audio")
+              .put("input_audio", JSONObject().put("data", audio).put("format", "aac")),
+      )
+    }
+    messages.put(JSONObject().put("role", "user").put("content", userContent))
     val body =
         JSONObject()
             .put("model", Prefs.openrouterModel)
             // запас на «размышления» у думающих моделей, сами размышления не возвращаем
             .put("max_tokens", maxTokens * 4)
             .put("reasoning", JSONObject().put("effort", "low").put("exclude", true))
-            .put(
-                "messages",
-                JSONArray()
-                    .put(JSONObject().put("role", "system").put("content", system))
-                    .put(JSONObject().put("role", "user").put("content", userContent)),
-            )
+            .put("messages", messages)
     val json =
         post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -73,9 +108,14 @@ object AiClient {
   }
 
   // ---------- Claude ----------
-  private fun claude(system: String, text: String, jpeg: String?, maxTokens: Int): String {
+  private fun claude(system: String, text: String, jpeg: String?, maxTokens: Int, history: List<Turn>): String {
     val key = Prefs.claudeKey
     require(key.isNotBlank()) { "Не указан ключ Claude API (раздел «Настройки ИИ»)" }
+    val messages = JSONArray()
+    history.forEach {
+      messages.put(JSONObject().put("role", "user").put("content", it.user))
+      messages.put(JSONObject().put("role", "assistant").put("content", it.assistant))
+    }
     val content = JSONArray()
     if (jpeg != null) {
       content.put(
@@ -83,20 +123,18 @@ object AiClient {
               .put("type", "image")
               .put(
                   "source",
-                  JSONObject()
-                      .put("type", "base64")
-                      .put("media_type", "image/jpeg")
-                      .put("data", jpeg),
+                  JSONObject().put("type", "base64").put("media_type", "image/jpeg").put("data", jpeg),
               ),
       )
     }
     content.put(JSONObject().put("type", "text").put("text", text))
+    messages.put(JSONObject().put("role", "user").put("content", content))
     val body =
         JSONObject()
             .put("model", Prefs.claudeModel)
             .put("max_tokens", maxTokens)
             .put("system", system)
-            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+            .put("messages", messages)
 
     val json =
         post(
@@ -114,21 +152,40 @@ object AiClient {
   }
 
   // ---------- Gemini ----------
-  private fun gemini(system: String, text: String, jpeg: String?, maxTokens: Int): String {
+  private fun gemini(
+      system: String,
+      text: String,
+      jpeg: String?,
+      maxTokens: Int,
+      history: List<Turn>,
+      audio: String?,
+  ): String {
     val key = Prefs.geminiKey
     require(key.isNotBlank()) { "Не указан ключ Gemini API (раздел «Настройки ИИ»)" }
-    val parts = JSONArray()
-    if (jpeg != null) {
-      parts.put(
+    val contents = JSONArray()
+    history.forEach {
+      contents.put(
+          JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", it.user))),
+      )
+      contents.put(
           JSONObject()
-              .put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", jpeg)),
+              .put("role", "model")
+              .put("parts", JSONArray().put(JSONObject().put("text", it.assistant))),
       )
     }
+    val parts = JSONArray()
+    if (jpeg != null) {
+      parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", jpeg)))
+    }
+    if (audio != null) {
+      parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "audio/aac").put("data", audio)))
+    }
     parts.put(JSONObject().put("text", text))
+    contents.put(JSONObject().put("role", "user").put("parts", parts))
     val body =
         JSONObject()
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
-            .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
+            .put("contents", contents)
             .put("generationConfig", JSONObject().put("maxOutputTokens", maxTokens * 4))
 
     val json =
@@ -154,7 +211,7 @@ object AiClient {
     try {
       conn.requestMethod = "POST"
       conn.connectTimeout = 15_000
-      conn.readTimeout = 45_000
+      conn.readTimeout = 120_000
       conn.doOutput = true
       conn.setRequestProperty("content-type", "application/json")
       headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }

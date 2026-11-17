@@ -3,16 +3,22 @@ package com.artem.glassai
 import android.content.Context
 import android.content.SharedPreferences
 
-/** Все настройки приложения: ключи API, модель, языки. Хранятся только на телефоне. */
+/** Все настройки приложения: ключи API, модель, языки, переключатели. Хранятся только на телефоне. */
 object Prefs {
-  private lateinit var sp: SharedPreferences
+  private var sp: SharedPreferences? = null
 
   fun init(context: Context) {
-    sp = context.getSharedPreferences("glassai", Context.MODE_PRIVATE)
+    if (sp == null) sp = context.applicationContext.getSharedPreferences("glassai", Context.MODE_PRIVATE)
   }
 
-  private fun str(key: String, def: String) = sp.getString(key, def) ?: def
-  private fun put(key: String, value: String) = sp.edit().putString(key, value).apply()
+  private fun str(key: String, def: String) = sp?.getString(key, def) ?: def
+  private fun put(key: String, value: String) {
+    sp?.edit()?.putString(key, value)?.apply()
+  }
+  private fun bool(key: String, def: Boolean) = sp?.getBoolean(key, def) ?: def
+  private fun put(key: String, value: Boolean) {
+    sp?.edit()?.putBoolean(key, value)?.apply()
+  }
 
   /** "openrouter", "claude" или "gemini" */
   var provider: String
@@ -52,6 +58,31 @@ object Prefs {
   var theirLang: String
     get() = str("theirLang", "th-TH")
     set(v) = put("theirLang", v)
+
+  /** После ответа слушать следующий вопрос без нажатия */
+  var dialog: Boolean
+    get() = bool("dialog", true)
+    set(v) = put("dialog", v)
+
+  /** Управление тачпадом на дужке (держит постоянную связь с очками) */
+  var controls: Boolean
+    get() = bool("controls", false)
+    set(v) = put("controls", v)
+
+  /** Читать уведомления вслух */
+  var readNotifs: Boolean
+    get() = bool("readNotifs", false)
+    set(v) = put("readNotifs", v)
+
+  /** Диктофон пишет с микрофона очков (иначе — телефона) */
+  var recGlassesMic: Boolean
+    get() = bool("recGlassesMic", false)
+    set(v) = put("recGlassesMic", v)
+
+  /** Как часто гид смотрит вокруг, секунд */
+  var guideSec: Int
+    get() = str("guideSec", "20").toIntOrNull() ?: 20
+    set(v) = put("guideSec", v.toString())
 }
 
 /** Языки, которые можно выбрать. Код — для распознавания и озвучки, имя — для ИИ и экрана. */

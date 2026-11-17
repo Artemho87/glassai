@@ -179,8 +179,19 @@ object Voice {
 
   // ---------- озвучка ----------
 
+  private val speakLock = kotlinx.coroutines.sync.Mutex()
+
   suspend fun speak(text: String, langCode: String) {
     if (text.isBlank()) return
+    speakLock.lock()
+    try {
+      speakNow(text, langCode)
+    } finally {
+      speakLock.unlock()
+    }
+  }
+
+  private suspend fun speakNow(text: String, langCode: String) {
     // ждём, пока движок озвучки проснётся (первый запуск)
     withTimeoutOrNull(3_000) { while (!ttsReady) delay(100) }
     val engine = tts ?: return
@@ -211,6 +222,10 @@ object Voice {
               @Deprecated("Deprecated in Java")
               override fun onError(utteranceId: String?) {
                 if (utteranceId == id && cont.isActive) cont.resume(Unit)
+              }
+
+              override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                if (cont.isActive) cont.resume(Unit)
               }
 
               override fun onError(utteranceId: String?, errorCode: Int) {

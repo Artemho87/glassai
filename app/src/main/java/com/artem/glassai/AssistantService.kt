@@ -36,6 +36,7 @@ class AssistantService : Service() {
     super.onCreate()
     Brain.init(this)
     Glasses.init(this)
+    Brain.startBackground()
     val nm = getSystemService(NotificationManager::class.java)
     nm.createNotificationChannel(
         NotificationChannel(CHANNEL, "Очки ИИ", NotificationManager.IMPORTANCE_LOW).apply {
@@ -57,7 +58,7 @@ class AssistantService : Service() {
       return START_NOT_STICKY
     }
     when (intent?.action) {
-      ACTION_ASK -> Brain.ask()
+      ACTION_ASK -> if (Brain.recordingOn.value) Brain.stopRecording() else Brain.ask()
       ACTION_TRANSLATE -> if (Brain.translatorOn.value) Brain.stopAll() else Brain.startTranslator()
       ACTION_REPLY -> Brain.replyMine()
       ACTION_STOP -> Brain.stopAll()
