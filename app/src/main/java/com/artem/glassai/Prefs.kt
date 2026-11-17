@@ -14,9 +14,9 @@ object Prefs {
   private fun str(key: String, def: String) = sp.getString(key, def) ?: def
   private fun put(key: String, value: String) = sp.edit().putString(key, value).apply()
 
-  /** "claude" или "gemini" */
+  /** "openrouter", "claude" или "gemini" */
   var provider: String
-    get() = str("provider", "claude")
+    get() = str("provider", "openrouter")
     set(v) = put("provider", v)
 
   var claudeKey: String
@@ -26,6 +26,14 @@ object Prefs {
   var claudeModel: String
     get() = str("claudeModel", "claude-haiku-5-5")
     set(v) = put("claudeModel", v.trim())
+
+  var openrouterKey: String
+    get() = str("openrouterKey", "")
+    set(v) = put("openrouterKey", v.trim())
+
+  var openrouterModel: String
+    get() = str("openrouterModel", "google/gemini-3.1-flash-lite")
+    set(v) = put("openrouterModel", v.trim())
 
   var geminiKey: String
     get() = str("geminiKey", "")

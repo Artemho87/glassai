@@ -256,17 +256,29 @@ private fun AiSettings() {
   var claudeKey by remember { mutableStateOf(Prefs.claudeKey) }
   var claudeModel by remember { mutableStateOf(Prefs.claudeModel) }
   var geminiKey by remember { mutableStateOf(Prefs.geminiKey) }
+  var orKey by remember { mutableStateOf(Prefs.openrouterKey) }
+  var orModel by remember { mutableStateOf(Prefs.openrouterModel) }
   var geminiModel by remember { mutableStateOf(Prefs.geminiModel) }
 
   Section("Настройки ИИ") {
     Row(verticalAlignment = Alignment.CenterVertically) {
-      RadioButton(selected = provider == "claude", onClick = { provider = "claude"; Prefs.provider = "claude" })
-      Text("Claude", color = Color.White)
-      Spacer(Modifier.padding(8.dp))
-      RadioButton(selected = provider == "gemini", onClick = { provider = "gemini"; Prefs.provider = "gemini" })
-      Text("Gemini", color = Color.White)
+      listOf("openrouter" to "OpenRouter", "claude" to "Claude", "gemini" to "Gemini").forEach { (id, title) ->
+        RadioButton(selected = provider == id, onClick = { provider = id; Prefs.provider = id })
+        Text(title, color = Color.White, fontSize = 14.sp)
+      }
     }
-    if (provider == "claude") {
+    if (provider == "openrouter") {
+      KeyField("Ключ OpenRouter (sk-or-…)", orKey) { orKey = it; Prefs.openrouterKey = it }
+      OutlinedTextField(
+          value = orModel,
+          onValueChange = { orModel = it; Prefs.openrouterModel = it },
+          label = { Text("Модель") },
+          singleLine = true,
+          modifier = Modifier.fillMaxWidth(),
+      )
+      Hint("google/gemini-3.1-flash-lite — быстро и очень дёшево. Умнее: google/gemini-3.5-flash " +
+          "(список на openrouter.ai/models). Модель должна понимать картинки.")
+    } else if (provider == "claude") {
       KeyField("Ключ Claude API (sk-ant-…)", claudeKey) { claudeKey = it; Prefs.claudeKey = it }
       OutlinedTextField(
           value = claudeModel,

@@ -16,8 +16,11 @@ object AiClient {
   suspend fun ask(system: String, text: String, image: Bitmap?, maxTokens: Int = 400): String =
       withContext(Dispatchers.IO) {
         val jpeg = image?.let { toBase64Jpeg(it) }
-        if (Prefs.provider == "gemini") gemini(system, text, jpeg, maxTokens)
-        else claude(system, text, jpeg, maxTokens)
+        when (Prefs.provider) {
+          "gemini" -> gemini(system, text, jpeg, maxTokens)
+          "claude" -> claude(system, text, jpeg, maxTokens)
+          else -> openrouter(system, text, jpeg, maxTokens)
+        }
       }
 
   suspend fun translate(text: String, fromCode: String, toCode: String): String {
@@ -26,6 +29,47 @@ object AiClient {
             "на язык «${Langs.name(toCode)}». Выведи только перевод, естественным разговорным языком, " +
             "без кавычек, пояснений и транслитерации. Если фраза уже на нужном языке — просто повтори её."
     return ask(system, text, null, 300)
+  }
+
+  // ---------- OpenRouter (формат OpenAI, любая модель с поддержкой картинок) ----------
+  private fun openrouter(system: String, text: String, jpeg: String?, maxTokens: Int): String {
+    val key = Prefs.openrouterKey
+    require(key.isNotBlank()) { "Не указан ключ OpenRouter (раздел «Настройки ИИ»)" }
+    val userContent = JSONArray()
+    userContent.put(JSONObject().put("type", "text").put("text", text))
+    if (jpeg != null) {
+      userContent.put(
+          JSONObject()
+              .put("type", "image_url")
+              .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$jpeg")),
+      )
+    }
+    val body =
+        JSONObject()
+            .put("model", Prefs.openrouterModel)
+            // запас на «размышления» у думающих моделей, сами размышления не возвращаем
+            .put("max_tokens", maxTokens * 4)
+            .put("reasoning", JSONObject().put("effort", "low").put("exclude", true))
+            .put(
+                "messages",
+                JSONArray()
+                    .put(JSONObject().put("role", "system").put("content", system))
+                    .put(JSONObject().put("role", "user").put("content", userContent)),
+            )
+    val json =
+        post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            mapOf(
+                "Authorization" to "Bearer $key",
+                "HTTP-Referer" to "https://github.com/Artemho87/glassai",
+                "X-Title" to "GlassAI",
+            ),
+            body.toString(),
+        )
+    val choices = json.optJSONArray("choices")
+    if (choices == null || choices.length() == 0) error("OpenRouter не дал ответа")
+    val msg = choices.getJSONObject(0).optJSONObject("message")
+    return (msg?.optString("content") ?: "").trim().ifBlank { error("OpenRouter вернул пустой ответ") }
   }
 
   // ---------- Claude ----------
