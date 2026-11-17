@@ -29,13 +29,26 @@ jobs:
           test ${PIPESTATUS[0]} -eq 0
           cp app/build/outputs/apk/debug/app-debug.apk GlassAI.apk
 
+      - name: Справка по API очков
+        if: always()
+        run: |
+          mkdir -p apidump && cd apidump
+          for a in $(find ~/.gradle -name "mwdat-*.aar" | grep -v mockdevice | grep -v display); do
+            n=$(basename $a .aar); mkdir -p $n; unzip -q -o $a classes.jar -d $n || continue
+            echo "##### $n" >> ../api.txt
+            javap -p -cp $n/classes.jar $(unzip -Z1 $n/classes.jar | grep '^com/meta/wearable/dat/.*\.class$' | sed 's/\.class$//; s#/#.#g') >> ../api.txt 2>/dev/null || true
+          done
+          cd .. && touch api.txt build.log && wc -l api.txt
+
       - name: Лог сборки (при ошибке)
-        if: failure()
+        if: always()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-log
           name: Лог последней ошибки сборки
-          files: build.log
+          files: |
+            build.log
+            api.txt
 
       - name: Файл сборки
         uses: actions/upload-artifact@v4

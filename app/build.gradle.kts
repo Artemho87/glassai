@@ -60,4 +60,5 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.mwdat.core)
   implementation(libs.mwdat.camera)
+  implementation(libs.mwdat.inputs)
 }
