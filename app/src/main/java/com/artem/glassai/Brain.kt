@@ -65,11 +65,22 @@ object Brain {
           while (busy.value) delay(50) // ждём, пока переводчик отпустит микрофон
           busy.value = true
           try {
+            // Сначала запускаем камеру очков, и только когда видео пошло — включаем их микрофон:
+            // одновременный запуск гарнитуры мешал камере подключиться.
+            val cameraReady = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val photoTask = async {
+              runCatching {
+                Glasses.capture(
+                    onStep = { status.value = "Камера: $it…" },
+                    onStreaming = { cameraReady.complete(Unit) },
+                )
+              }
+            }
+            kotlinx.coroutines.withTimeoutOrNull(25_000) { cameraReady.await() }
+
             val glassesAudio = Voice.routeToGlasses()
             Voice.beep()
             status.value = if (glassesAudio) "Слушаю (микрофон очков)…" else "Слушаю (микрофон телефона)…"
-
-            val photoTask = async { runCatching { Glasses.capture() } }
             val question = Voice.listen(Prefs.myLang) ?: ""
 
             status.value = "Снимаю кадр…"
@@ -101,6 +112,28 @@ object Brain {
             busy.value = false
             asking = false
             if (status.value.startsWith("Ошибка").not()) status.value = "Готов"
+          }
+        }
+  }
+
+  /** Проверка камеры без микрофона и ИИ: показывает кадр или точную ошибку. */
+  fun testCamera() {
+    if (busy.value) return
+    busy.value = true
+    job =
+        scope.launch {
+          try {
+            val bmp = Glasses.capture(onStep = { status.value = "Камера: $it…" })
+            lastPhoto.value = bmp
+            addLog("📷", "Кадр получен: ${bmp.width}×${bmp.height}")
+            status.value = "Камера работает ✅"
+          } catch (e: CancellationException) {
+            throw e
+          } catch (e: Exception) {
+            addLog("⚠", "Камера: ${e.message}")
+            status.value = "Камера: ошибка (см. журнал)"
+          } finally {
+            busy.value = false
           }
         }
   }

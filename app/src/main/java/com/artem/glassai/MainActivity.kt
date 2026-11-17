@@ -151,6 +151,9 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
           Text("Разрешить камеру")
         }
       }
+      OutlinedButton(onClick = { Brain.testCamera() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+        Text("📷  Проверить камеру очков")
+      }
       Hint("Штатная съёмка («Hey Meta, take a photo», кнопка на дужке) работает как раньше: " +
           "приложение берёт камеру только на 2–3 секунды во время вопроса.")
     }
