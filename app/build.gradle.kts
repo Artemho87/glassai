@@ -14,8 +14,11 @@ android {
     applicationId = "com.artem.glassai"
     minSdk = 31
     targetSdk = 36
-    versionCode = 2
-    versionName = "1.1"
+    versionCode = 3
+    versionName = "1.2"
+
+    // Только 64-битные ARM-телефоны (все современные Android): APK заметно меньше
+    ndk { abiFilters += "arm64-v8a" }
 
     // Developer Mode в приложении Meta AI: оба значения "0"
     manifestPlaceholders["mwdat_application_id"] = "0"
