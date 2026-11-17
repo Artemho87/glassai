@@ -61,6 +61,13 @@ object Glasses {
   /** true, пока приложение слушает тачпад на дужке */
   val controlsActive = MutableStateFlow(false)
 
+  /** Очки требуют обновить свой компонент для сторонних приложений (делается в Meta AI). */
+  val needsUpdate = MutableStateFlow(false)
+
+  const val UPDATE_HELP =
+      "Очкам нужно обновление для сторонних приложений. Открой Meta AI → настройки очков → " +
+          "App Connections (Подключённые приложения) → обнови или установи компонент, потом нажми «Проверить камеру»"
+
   private val mutex = Mutex()
   @Volatile private var held: DeviceSession? = null
 
@@ -95,8 +102,16 @@ object Glasses {
                 "Очки не найдены: ${createdResult.errorOrNull()?.description ?: "нет подключения"}",
             )
     var lastError: String? = null
+    var updateRequired = false
     val errJob =
-        CoroutineScope(Dispatchers.Main).launch { s.errors.collect { lastError = it.description } }
+        CoroutineScope(Dispatchers.Main).launch {
+          s.errors.collect {
+            lastError = it.description
+            if (it.toString().contains("UPDATE_REQUIRED") || it.description.contains("need an update")) {
+              updateRequired = true
+            }
+          }
+        }
     try {
       s.start()
       val st =
@@ -105,11 +120,16 @@ object Glasses {
           }
       if (st != DeviceSessionState.STARTED) {
         runCatching { s.stop() }
+        if (updateRequired) {
+          needsUpdate.value = true
+          throw GlassesException(UPDATE_HELP)
+        }
         throw GlassesException(
             "Очки не ответили (сеанс: ${st ?: s.state.value}${lastError?.let { ", $it" } ?: ""}). " +
                 "Надень очки, открой дужки, проверь Bluetooth",
         )
       }
+      needsUpdate.value = false
     } finally {
       errJob.cancel()
     }
@@ -139,8 +159,10 @@ object Glasses {
         }
       }
 
-  private suspend fun requireCamera(onStep: (String) -> Unit) {
+  private suspend fun requireCamera(onStep: (String) -> Unit, force: Boolean = false) {
     onStep("проверяю подключение")
+    // пока очки не обновлены, не тратим по 20 секунд на каждую попытку
+    if (needsUpdate.value && !force) throw GlassesException(UPDATE_HELP)
     if (!initialized.value) throw GlassesException("Очки ещё не подключены к приложению")
     if (!isCameraAllowed()) {
       throw GlassesException("Нет доступа к камере очков: в приложении нажми «Разрешить камеру»")
@@ -156,9 +178,13 @@ object Glasses {
    * @param onStreaming вызывается, когда видео пошло или всё сломалось — после этого можно
    *   включать микрофон очков, не мешая запуску камеры
    */
-  suspend fun capture(onStep: (String) -> Unit = {}, onStreaming: () -> Unit = {}): Bitmap {
+  suspend fun capture(
+      onStep: (String) -> Unit = {},
+      onStreaming: () -> Unit = {},
+      force: Boolean = false,
+  ): Bitmap {
     try {
-      requireCamera(onStep)
+      requireCamera(onStep, force)
       return withSession(onStep) { session ->
         val camResult =
             session.addCamera(
@@ -317,13 +343,14 @@ object Glasses {
           } catch (e: Exception) {
             failures++
             onLog("Управление с дужки: ${e.message}")
+            if (needsUpdate.value) failures = 99
           } finally {
             controlsActive.value = false
             if (held === mine) held = null
             runCatching { mine?.stop() }
           }
           if (failures >= 4) {
-            onLog("Управление с дужки выключено: очки не отвечают")
+            onLog("Управление с дужки выключено. Включи снова, когда связь с очками заработает")
             onGiveUp()
             break
           }

@@ -147,6 +147,8 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
   val device by Glasses.device.collectAsState()
   val controlsActive by Glasses.controlsActive.collectAsState()
 
+  val needsUpdate by Glasses.needsUpdate.collectAsState()
+  var tab by remember { mutableStateOf(0) }
   var myLang by remember { mutableStateOf(Prefs.myLang) }
   var theirLang by remember { mutableStateOf(Prefs.theirLang) }
   var dialog by remember { mutableStateOf(Prefs.dialog) }
@@ -174,6 +176,25 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
       Text("🔋 Очки: $battery$worn$charging", fontSize = 14.sp, color = Color(0xFFBBBBBB))
     }
 
+    if (tab == 3) {
+    if (needsUpdate) {
+      Box(Modifier.fillMaxWidth().background(Red, RoundedCornerShape(12.dp)).padding(12.dp)) {
+        Text("⚠ " + Glasses.UPDATE_HELP, color = Color.White, fontSize = 14.sp)
+      }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+      listOf("Главная", "Сохранённое", "Журнал", "Настройки").forEachIndexed { i, title ->
+        OutlinedButton(
+            onClick = { tab = i },
+            modifier = Modifier.weight(1f),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(2.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = if (tab == i) Yellow else Color(0xFF9A9AB0)),
+        ) {
+          Text(title, fontSize = 12.sp, maxLines = 1)
+        }
+      }
+    }
+
     // ---------- Подключение ----------
     Section("Подключение очков") {
       if (initialized) RegistrationLine()
@@ -188,6 +209,8 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
       }
     }
 
+    }
+    if (tab == 0) {
     // ---------- Помощник ----------
     Section("ИИ-помощник") {
       Button(
@@ -227,6 +250,8 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
       }
     }
 
+    }
+    if (tab == 0) {
     // ---------- Гид ----------
     Section("Режим гида") {
       Button(
@@ -255,6 +280,8 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
           "достопримечательность. Каждая находка сохраняется с фото и описанием в «Сохранённое».")
     }
 
+    }
+    if (tab == 0) {
     // ---------- Переводчик ----------
     Section("ИИ-переводчик") {
       Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -286,6 +313,8 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
       }
     }
 
+    }
+    if (tab == 0) {
     // ---------- Диктофон ----------
     Section("Диктофон встреч") {
       Button(
@@ -304,6 +333,8 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
           "Микрофон телефона на столе обычно лучше слышит всех участников.")
     }
 
+    }
+    if (tab == 3) {
     // ---------- Тачпад ----------
     Section("Управление с дужки очков") {
       Toggle("Слушать тачпад на дужке", controls) {
@@ -321,6 +352,8 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
           "по нему подстроим. Пока включено, тачпад может не управлять музыкой и громкостью.")
     }
 
+    }
+    if (tab == 3) {
     // ---------- Уведомления ----------
     Section("Чтение уведомлений вслух") {
       Toggle("Читать сообщения, звонки и напоминания в очки", readNotifs) {
@@ -342,12 +375,17 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
       Hint("В открывшемся списке включи «Очки ИИ». Читаются только сообщения, почта, звонки, события.")
     }
 
+    }
+    if (tab == 0) {
     OutlinedButton(onClick = { Brain.stopAll() }, modifier = Modifier.fillMaxWidth()) { Text("■ Стоп всё") }
 
+    }
+    if (tab == 1) {
     // ---------- Сохранённое ----------
+    if (saved.isEmpty()) Hint("Пока пусто. Здесь появятся находки гида, заметки, фото и итоги встреч.")
     if (saved.isNotEmpty()) {
       Section("Сохранённое (${saved.size})") {
-        saved.take(25).forEach { item ->
+        saved.take(100).forEach { item ->
           Text(
               "${item.time} · ${item.kind}: ${item.text.take(260)}",
               color = Color(0xFFDDDDDD),
@@ -360,17 +398,67 @@ private fun Screen(onRegister: () -> Unit, onCameraPermission: () -> Unit) {
       }
     }
 
+    }
+    if (tab == 2) {
     // ---------- Журнал ----------
-    if (log.isNotEmpty()) {
-      Section("Журнал") {
-        log.forEach { line ->
-          Text("${line.who}: ${line.text}", color = Color(0xFFDDDDDD), fontSize = 14.sp)
+    Section("Журнал (${log.size})") {
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = {
+              val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+              cm.setPrimaryClip(android.content.ClipData.newPlainText("Журнал Очки ИИ", Brain.logAsText()))
+              Toast.makeText(context, "Журнал скопирован", Toast.LENGTH_SHORT).show()
+            },
+            modifier = Modifier.weight(1f),
+        ) {
+          Text("📋 Копировать всё")
         }
-        OutlinedButton(onClick = { Brain.clearLog() }) { Text("Очистить") }
+        OutlinedButton(onClick = { Brain.clearLog() }, modifier = Modifier.weight(1f)) { Text("Очистить") }
+      }
+      if (log.isEmpty()) Hint("Пока пусто. Сюда пишутся вопросы, ответы и ошибки.")
+      log.forEach { line ->
+        Text("${line.who}: ${line.text}", color = Color(0xFFDDDDDD), fontSize = 13.sp)
       }
     }
-
+    }
+    if (tab == 3) {
+    Section("Работа в фоне и с заблокированным экраном") {
+      OutlinedButton(
+          onClick = {
+            runCatching {
+              context.startActivity(
+                  Intent(
+                          Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                          Uri.parse("package:" + context.packageName),
+                      )
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+              )
+            }
+          },
+          modifier = Modifier.fillMaxWidth(),
+      ) {
+        Text("1. Отключить экономию батареи для приложения")
+      }
+      OutlinedButton(
+          onClick = {
+            runCatching {
+              context.startActivity(
+                  Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + context.packageName))
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+              )
+            }
+          },
+          modifier = Modifier.fillMaxWidth(),
+      ) {
+        Text("2. Открыть настройки приложения")
+      }
+      Hint("В настройках приложения (Realme): «Расход батареи» → разреши фоновую активность и автозапуск. " +
+          "В списке недавних приложений потяни карточку «Очки ИИ» вниз и нажми «Закрепить» (замок), " +
+          "чтобы система её не выгружала. С заблокированным экраном пользуйся кнопками в уведомлении " +
+          "или тачпадом на дужке.")
+    }
     AiSettings()
+    }
     Spacer(Modifier.height(40.dp))
   }
 }

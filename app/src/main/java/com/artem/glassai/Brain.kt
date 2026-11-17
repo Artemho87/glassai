@@ -63,8 +63,14 @@ object Brain {
   }
 
   private fun addLog(who: String, text: String) {
-    log.value = (listOf(Line(who, text)) + log.value).take(60)
+    val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+    val prev = log.value.firstOrNull()
+    // одинаковые подряд сообщения не дублируем
+    if (prev != null && prev.who.substringAfter(" ") == who && prev.text == text) return
+    log.value = (listOf(Line("$time $who", text)) + log.value).take(400)
   }
+
+  fun logAsText(): String = log.value.reversed().joinToString("\n") { "${it.who}: ${it.text}" }
 
   /** Сказать что-то в очки, если помощник сейчас не занят (уведомления, заряд). */
   fun announce(text: String) {
@@ -155,8 +161,10 @@ object Brain {
             "К последнему вопросу приложено фото — это то, что пользователь видит прямо сейчас через " +
                 "камеру очков (вид от первого лица). Опирайся на него, если вопрос про увиденное."
         else
-            "Фото к этому вопросу не приложено. Если вопрос требует зрения, а в разговоре уже было " +
-                "описание увиденного — опирайся на него; иначе просто ответь на вопрос."
+            "Фото к этому вопросу НЕ приложено: камера очков сейчас не передала кадр, ты ничего не видишь. " +
+                "Никогда не притворяйся, что видишь. Если вопрос про то, что перед пользователем, честно " +
+                "скажи одной фразой, что кадр с очков не пришёл и причина записана в журнале приложения. " +
+                "На остальные вопросы отвечай как обычно."
     return "Ты голосовой помощник в умных очках Ray-Ban Meta. $photoPart " +
         "Отвечай на языке «$lang», кратко: 1–3 предложения, разговорно. " +
         "Без списков, markdown, эмодзи и ссылок — ответ будет озвучен голосом. " +
@@ -367,7 +375,7 @@ object Brain {
   /** Проверка камеры без микрофона и ИИ. */
   fun testCamera() =
       simpleJob("Камера") {
-        val bmp = Glasses.capture(onStep = { status.value = "Камера: $it…" })
+        val bmp = Glasses.capture(onStep = { status.value = "Камера: $it…" }, force = true)
         lastPhoto.value = bmp
         addLog("📷", "Кадр получен: ${bmp.width}×${bmp.height}. Камера работает ✅")
       }
@@ -454,7 +462,7 @@ object Brain {
                 } catch (e: Exception) {
                   fails++
                   addLog("⚠", "Гид: ${e.message}")
-                  if (fails >= 4) {
+                  if (fails >= 3 || Glasses.needsUpdate.value) {
                     addLog("🧭", "Гид выключен: камера не отвечает")
                     break
                   }

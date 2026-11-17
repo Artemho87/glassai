@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
+import kotlinx.coroutines.launch
 
 /**
  * Постоянное уведомление с кнопками «Спросить», «Переводчик», «Стоп».
@@ -30,13 +31,42 @@ class AssistantService : Service() {
     }
   }
 
+  private val scope = kotlinx.coroutines.MainScope()
+  private var wake: android.os.PowerManager.WakeLock? = null
+
   override fun onBind(intent: Intent?): IBinder? = null
+
+  override fun onDestroy() {
+    scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+    runCatching { wake?.let { if (it.isHeld) it.release() } }
+    super.onDestroy()
+  }
+
+  /** Пока помощник что-то делает, не даём телефону уснуть (работа с заблокированным экраном). */
+  private fun watchActivity() {
+    val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+    val lock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "GlassAI::Active")
+    lock.setReferenceCounted(false)
+    wake = lock
+    scope.launch {
+      kotlinx.coroutines.flow.combine(
+              Brain.busy,
+              Brain.guideOn,
+              Brain.translatorOn,
+              Glasses.controlsActive,
+          ) { a, b, c, d -> a || b || c || d }
+          .collect { active ->
+            runCatching { if (active) lock.acquire(3 * 60 * 60 * 1000L) else if (lock.isHeld) lock.release() }
+          }
+    }
+  }
 
   override fun onCreate() {
     super.onCreate()
     Brain.init(this)
     Glasses.init(this)
     Brain.startBackground()
+    watchActivity()
     val nm = getSystemService(NotificationManager::class.java)
     nm.createNotificationChannel(
         NotificationChannel(CHANNEL, "Очки ИИ", NotificationManager.IMPORTANCE_LOW).apply {
